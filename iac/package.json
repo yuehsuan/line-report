@@ -1,0 +1,23 @@
+{
+  "name": "line-report-iac",
+  "version": "1.0.0",
+  "description": "LINE 用量回報服務 AWS CDK IaC",
+  "main": "bin/app.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "cdk": "cdk",
+    "deploy": "cdk deploy --all --require-approval never",
+    "deploy:stack": "cdk deploy",
+    "diff": "cdk diff --all",
+    "synth": "cdk synth --all"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.177.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.177.0",
+    "typescript": "^5.7.3"
+  }
+}

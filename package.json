@@ -1,0 +1,32 @@
+{
+  "name": "line-report",
+  "version": "1.0.0",
+  "description": "LINE 官方帳號訊息用量快照與費用估算自動化服務",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "snapshot": "node --env-file=.env src/index.js snapshot",
+    "report": "node --env-file=.env src/index.js report --month=prev",
+    "test": "node --test src/__tests__/**/*.test.js",
+    "test:pricing": "node --test src/__tests__/pricing.test.js",
+    "test:date": "node --test src/__tests__/date.test.js",
+    "test:storage": "node --test src/__tests__/storage.test.js",
+    "dry-run": "node --env-file=.env scripts/dry-run.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.731.0",
+    "@aws-sdk/lib-dynamodb": "^3.731.0",
+    "axios": "^1.7.9",
+    "luxon": "^3.5.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-ssm": "^3.731.0",
+    "aws-sdk-client-mock": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
