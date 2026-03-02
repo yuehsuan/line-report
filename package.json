@@ -12,7 +12,9 @@
     "test:pricing": "node --test src/__tests__/pricing.test.js",
     "test:date": "node --test src/__tests__/date.test.js",
     "test:storage": "node --test src/__tests__/storage.test.js",
-    "dry-run": "node --env-file=.env scripts/dry-run.js"
+    "test:report": "node --test src/__tests__/report.test.js",
+    "dry-run": "node --env-file=.env scripts/dry-run.js",
+    "deploy": "node --env-file=.env scripts/cdk-deploy.js"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.731.0",

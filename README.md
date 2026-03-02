@@ -137,6 +137,7 @@ npm test
 npm run test:pricing    # 計費模型測試
 npm run test:date       # 日期工具測試
 npm run test:storage    # DynamoDB 整合測試（使用 mock）
+npm run test:report     # 回報失敗場景測試（使用 mock）
 ```
 
 ---
@@ -186,24 +187,44 @@ cdk bootstrap aws://<帳號ID>/<區域>
 
 ### Step 2：部署基礎設施
 
+在 `.env` 填入 `IMAGE_TAG`、排程設定與告警 Email，再執行：
+
 ```bash
-cd iac
+# 一鍵部署全部 stack（從 .env 讀取所有設定）
+npm run deploy
 
-# 依序部署各 stack
-cdk deploy LineReportDatabaseStack
-cdk deploy LineReportEcrStack
-cdk deploy LineReportMonitoringStack
-cdk deploy LineReportSsmStack
-
-# 部署 ECS（需要指定 image tag，禁用 latest）
-cdk deploy LineReportEcsStack --context imageTag=v20260225-1
-
-# 部署排程
-cdk deploy LineReportSchedulerStack
-
-# 或一鍵部署全部
-cdk deploy --all --context imageTag=v20260225-1
+# 只部署特定 stack
+npm run deploy -- --stacks LineReportSchedulerStack
 ```
+
+**`.env` 排程相關欄位（deploy 時生效）：**
+
+| 欄位 | 說明 | 預設值 |
+|------|------|--------|
+| `IMAGE_TAG` | Docker image tag（必填）| — |
+| `REPORT_MODE` | 回報模式：`date` 或 `weekday` | `date` |
+| `REPORT_DAY` | 每月固定日（`REPORT_MODE=date` 時用，1-28）| `11` |
+| `REPORT_WEEK` | 第幾週（`REPORT_MODE=weekday` 時用，1-5）| `2` |
+| `REPORT_WEEKDAY` | 星期幾（`REPORT_MODE=weekday` 時用，1=一…5=五）| `3` |
+| `REPORT_HOUR` | 每月回報時（台北時間）| `9` |
+| `SNAPSHOT_HOUR` | 每日快照時（台北時間）| `23` |
+| `SNAPSHOT_MINUTE` | 每日快照分 | `55` |
+| `ALARM_EMAIL` | 告警 Email（見下方說明）| — |
+
+**回報排程設定範例：**
+
+```bash
+# 模式一：每月固定 11 日（預設）
+REPORT_MODE=date
+REPORT_DAY=11
+
+# 模式二：每月第 2 個星期三（避開週末，彈性月中）
+REPORT_MODE=weekday
+REPORT_WEEK=2
+REPORT_WEEKDAY=3   # 1=一、2=二、3=三、4=四、5=五
+```
+
+> **提示：** 若固定日期（如 11 日）遇到週末，建議改用 `REPORT_MODE=weekday`，可確保回報一定落在工作日。
 
 ### Step 3：填入 SSM Parameter Store 機密值
 
@@ -215,11 +236,11 @@ aws ssm put-parameter \
   --value "YOUR_LINE_TOKEN" \
   --overwrite
 
-# LINE 群組 ID
+# LINE 推播目標（逗號分隔，C 開頭=群組，U 開頭=個人）
 aws ssm put-parameter \
-  --name /line-report/LINE_GROUP_ID \
+  --name /line-report/LINE_TARGETS \
   --type String \
-  --value "C1234567890abcdef" \
+  --value "C你的groupId,U你的userId" \
   --overwrite
 ```
 
@@ -353,6 +374,71 @@ aws scheduler get-schedule --name line-report-daily-snapshot > /tmp/current-sche
 > ```bash
 > cd iac && cdk deploy LineReportEcsStack --context imageTag=$TARGET_TAG
 > ```
+
+---
+
+## 告警設定
+
+服務在 CDK 部署後自動建立 CloudWatch Alarm，偵測到 `level=error` 的 log 即觸發。  
+告警路徑：**CloudWatch Alarm → SNS Topic `line-report-alarms` → Email**
+
+### 方式一：部署時直接訂閱（推薦）
+
+在 `.env` 填入 `ALARM_EMAIL`，再執行 `npm run deploy`，CDK 自動將 Email 加入 SNS 訂閱：
+
+```bash
+# .env
+ALARM_EMAIL=you@example.com
+
+npm run deploy
+```
+
+部署後 AWS 會寄確認信到該 Email，**必須點擊 "Confirm subscription" 連結才會收到告警**。
+
+---
+
+### 方式二：部署後手動訂閱（已部署可補設定）
+
+```bash
+# 取得 SNS Topic ARN
+TOPIC_ARN=$(aws cloudformation describe-stacks \
+  --stack-name LineReportMonitoringStack \
+  --query "Stacks[0].Outputs[?OutputKey=='AlarmTopicArn'].OutputValue" \
+  --output text)
+
+# 新增 Email 訂閱
+aws sns subscribe \
+  --topic-arn "$TOPIC_ARN" \
+  --protocol email \
+  --notification-endpoint "you@example.com"
+```
+
+執行後同樣需要點擊確認信。
+
+---
+
+### 查看現有訂閱
+
+```bash
+aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN"
+```
+
+### 取消訂閱
+
+```bash
+aws sns unsubscribe --subscription-arn "<SubscriptionArn>（從上方指令取得）"
+```
+
+---
+
+### 告警觸發條件
+
+| 告警名稱 | 條件 | Log Group |
+|---------|------|-----------|
+| `line-report-error-alarm` | 5 分鐘內 `level=error` ≥ 1 次 | `/ecs/line-report` |
+
+> **常見觸發原因：** prevMonthFinal 快照不存在、LINE API 失敗、DynamoDB 連線逾時。  
+> 錯誤詳情可至 CloudWatch Logs `line-report-error-alarm` 查詢。
 
 ---
 
