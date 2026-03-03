@@ -19,3 +19,4 @@ iac/lib/*.js
 
 # Cursor IDE
 .cursor/
+*.pkg

@@ -21,6 +21,8 @@
  */
 
 import { spawnSync } from 'child_process';
+import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 
 const imageTag = process.env.IMAGE_TAG;
 if (!imageTag) {
@@ -50,17 +52,43 @@ const contextArgs = [
   ...(process.env.ALARM_EMAIL ? [`alarmEmail=${process.env.ALARM_EMAIL}`] : []),
 ].flatMap((ctx) => ['--context', ctx]);
 
+// AWS_PROFILE → --profile（確保 SSO profile 正確傳入 CDK）
+const profileArgs = process.env.AWS_PROFILE
+  ? ['--profile', process.env.AWS_PROFILE]
+  : [];
+
 // CLI 追加參數（如 --stacks xxx）
 const extraArgs = process.argv.slice(2);
 
-const cdkArgs = ['cdk', 'deploy', '--all', ...contextArgs, ...extraArgs];
+// fileURLToPath 正確處理路徑中的中文/特殊字元
+const iacDir = fileURLToPath(new URL('../iac', import.meta.url));
+// 直接使用 iac/node_modules/.bin/cdk，不依賴 PATH 裡有沒有 npx
+const cdkBin = resolve(iacDir, 'node_modules', '.bin', 'cdk');
 
-console.log('[cdk-deploy] 執行：npx', cdkArgs.join(' '));
+const cdkArgs = [
+  'deploy', '--all',
+  ...profileArgs,
+  ...contextArgs,
+  ...extraArgs,
+];
 
-const result = spawnSync('npx', cdkArgs, {
-  cwd: new URL('../iac', import.meta.url).pathname,
+console.log('[cdk-deploy] 工作目錄：', iacDir);
+console.log('[cdk-deploy] CDK 執行檔：', cdkBin);
+console.log('[cdk-deploy] 執行：cdk', cdkArgs.join(' '));
+
+const result = spawnSync(cdkBin, cdkArgs, {
+  cwd: iacDir,
   stdio: 'inherit',
   env: process.env,
 });
+
+if (result.error) {
+  console.error('[cdk-deploy] 執行失敗，無法啟動子程序：', result.error.message);
+  process.exit(1);
+}
+
+if (result.status !== 0) {
+  console.error(`[cdk-deploy] CDK 部署失敗，exit code：${result.status}`);
+}
 
 process.exit(result.status ?? 1);
