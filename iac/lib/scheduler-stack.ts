@@ -24,13 +24,15 @@ export class SchedulerStack extends cdk.Stack {
     // Public subnet IDs（從 context 快取取出，與 EcsStack 相同的 VPC）
     const resolvedSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds;
 
-    // 固定名稱 cluster ARN，不引用 EcsStack 物件
+    // 固定名稱 cluster ARN
     const clusterArn = `arn:aws:ecs:${this.region}:${this.account}:cluster/line-report`;
 
-    // 固定 family 名稱：不帶版本號，EventBridge 自動選最新 ACTIVE revision
-    const taskDefFamily = 'line-report';
-    const taskDefinitionArn = `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDefFamily}`;
-    const taskDefinitionArnWildcard = `${taskDefinitionArn}:*`;
+    // 兩個獨立的 task definition family，各自 bake in 對應指令
+    // CloudFormation 的 EventBridge Scheduler EcsParameters 不支援 task override，
+    // 因此用兩個 task definition 取代，每個直接在 container command 設定指令。
+    const snapshotTaskDefArn = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-snapshot`;
+    const reportTaskDefArn   = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-report`;
+
     // Role ARN 用固定名稱建構
     const executionRoleArn = `arn:aws:iam::${this.account}:role/line-report-task-execution-role`;
     const taskRoleArn      = `arn:aws:iam::${this.account}:role/line-report-task-role`;
@@ -45,7 +47,10 @@ export class SchedulerStack extends cdk.Stack {
       sid: 'EcsRunTask',
       effect: iam.Effect.ALLOW,
       actions: ['ecs:RunTask'],
-      resources: [taskDefinitionArnWildcard],
+      resources: [
+        `${snapshotTaskDefArn}:*`,
+        `${reportTaskDefArn}:*`,
+      ],
     }));
 
     schedulerRole.addToPolicy(new iam.PolicyStatement({
@@ -55,26 +60,20 @@ export class SchedulerStack extends cdk.Stack {
       resources: [executionRoleArn, taskRoleArn],
     }));
 
-    const ecsParameters: scheduler.CfnSchedule.EcsParametersProperty = {
-      taskDefinitionArn,
-      launchType: 'FARGATE',
-      networkConfiguration: {
-        awsvpcConfiguration: {
-          subnets: resolvedSubnets,
-          securityGroups: [securityGroup.securityGroupId],
-          assignPublicIp: 'ENABLED',
-        },
+    const networkConfig = {
+      awsvpcConfiguration: {
+        subnets: resolvedSubnets,
+        securityGroups: [securityGroup.securityGroupId],
+        assignPublicIp: 'ENABLED',
       },
-      taskCount: 1,
     };
 
-    // 排程時間從 CDK context 讀取（deploy 時透過 --context 傳入，預設值對應 .env.example）
+    // 排程時間從 CDK context 讀取（deploy 時透過 --context 傳入）
     const snapshotHour   = this.node.tryGetContext('snapshotHour')   ?? '23';
     const snapshotMinute = this.node.tryGetContext('snapshotMinute') ?? '55';
     const reportHour     = this.node.tryGetContext('reportHour')     ?? '9';
     const reportMode     = this.node.tryGetContext('reportMode')     ?? 'date';
 
-    // ── 回報 cron 依 reportMode 產生（邏輯集中於 cron-builder.ts）──
     const { cron: reportCron, description: reportDescription } = buildReportCron({
       reportMode,
       reportDay:      String(this.node.tryGetContext('reportDay')      ?? '11'),
@@ -83,7 +82,7 @@ export class SchedulerStack extends cdk.Stack {
       reportHour,
     });
 
-    // ── Schedule A：每日快照（預設 23:55 Asia/Taipei）────────────
+    // ── Schedule A：每日快照（23:55 Asia/Taipei）─────────────────
     new scheduler.CfnSchedule(this, 'DailySnapshotSchedule', {
       name: 'line-report-daily-snapshot',
       description: `LINE 用量每日快照（${snapshotHour}:${snapshotMinute.padStart(2,'0')} Asia/Taipei）`,
@@ -94,18 +93,12 @@ export class SchedulerStack extends cdk.Stack {
       target: {
         arn: clusterArn,
         roleArn: schedulerRole.roleArn,
-        // CDK 型別定義缺少 overrides，但 CloudFormation 支援；用 double cast 繞過
         ecsParameters: {
-          ...ecsParameters,
-          overrides: {
-            containerOverrides: [
-              {
-                name: 'app',
-                command: ['node', 'src/index.js', 'snapshot'],
-              },
-            ],
-          },
-        } as unknown as scheduler.CfnSchedule.EcsParametersProperty,
+          taskDefinitionArn: snapshotTaskDefArn,
+          launchType: 'FARGATE',
+          networkConfiguration: networkConfig,
+          taskCount: 1,
+        },
         retryPolicy: {
           maximumRetryAttempts: 2,
           maximumEventAgeInSeconds: 600,
@@ -124,18 +117,12 @@ export class SchedulerStack extends cdk.Stack {
       target: {
         arn: clusterArn,
         roleArn: schedulerRole.roleArn,
-        // CDK 型別定義缺少 overrides，但 CloudFormation 支援；用 double cast 繞過
         ecsParameters: {
-          ...ecsParameters,
-          overrides: {
-            containerOverrides: [
-              {
-                name: 'app',
-                command: ['node', 'src/index.js', 'report', '--month=prev'],
-              },
-            ],
-          },
-        } as unknown as scheduler.CfnSchedule.EcsParametersProperty,
+          taskDefinitionArn: reportTaskDefArn,
+          launchType: 'FARGATE',
+          networkConfiguration: networkConfig,
+          taskCount: 1,
+        },
         retryPolicy: {
           maximumRetryAttempts: 2,
           maximumEventAgeInSeconds: 1800,
