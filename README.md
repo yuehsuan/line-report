@@ -58,9 +58,10 @@ cp .env.example .env
 | 變數 | 說明 | 預設值 | 必填 |
 |---|---|---|---|
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token | — | ✅ |
-| `LINE_GROUP_ID` | 推播目標群組 ID | — | ✅ |
+| `LINE_TARGETS` | 推播目標（逗號分隔；C=群組、U=個人、R=聊天室） | — | ✅ |
 | `FREE_QUOTA` | 每月免費訊息額度（則） | `0` | |
 | `PRICING_MODEL` | 計費模式：`single` 或 `tiers` | `single` | |
+| `PLAN_FEE` | 月方案費（元），每月固定計收；設 0 表示不計入 | `0` | |
 | `SINGLE_UNIT_PRICE` | single 模式：每則單價（TWD） | `0.2` | |
 | `TIERS_JSON` | tiers 模式：級距 JSON（見下方說明） | — | tiers 時必填 |
 | `AWS_REGION` | AWS 區域 | `ap-northeast-1` | |
@@ -104,25 +105,26 @@ cp .env.example .env
 ### 3. 執行快照
 
 ```bash
-node src/index.js snapshot
+npm run snapshot
 ```
 
 ### 4. 執行回報（前月）
 
 ```bash
-node src/index.js report --month=prev
+npm run report
 ```
 
 ### 5. 執行回報（指定月份）
 
 ```bash
-node src/index.js report --month=2026-01
+node --env-file=.env src/index.js report --month=2026-01
 ```
 
 ### 6. DRY_RUN 模式（跳過 LINE push，僅印出訊息）
 
 ```bash
-DRY_RUN=true node src/index.js report --month=prev
+# 在 .env 中設定 DRY_RUN=true 後執行
+npm run report
 ```
 
 ---
@@ -193,8 +195,8 @@ cdk bootstrap aws://<帳號ID>/<區域>
 # 一鍵部署全部 stack（從 .env 讀取所有設定）
 npm run deploy
 
-# 只部署特定 stack
-npm run deploy -- --stacks LineReportSchedulerStack
+# 只部署特定 stack（stack 名稱直接當參數）
+npm run deploy -- LineReportSchedulerStack
 ```
 
 **`.env` 排程相關欄位（deploy 時生效）：**
@@ -233,6 +235,7 @@ REPORT_WEEKDAY=3   # 1=一、2=二、3=三、4=四、5=五
 ```bash
 # LINE Channel Access Token（SecureString）
 aws ssm put-parameter \
+  --profile srec \
   --name /line-report/LINE_CHANNEL_ACCESS_TOKEN \
   --type SecureString \
   --value "YOUR_LINE_TOKEN" \
@@ -240,6 +243,7 @@ aws ssm put-parameter \
 
 # LINE 推播目標（逗號分隔，C 開頭=群組，U 開頭=個人）
 aws ssm put-parameter \
+  --profile srec \
   --name /line-report/LINE_TARGETS \
   --type String \
   --value "C你的groupId,U你的userId" \
@@ -250,7 +254,7 @@ aws ssm put-parameter \
 
 ```bash
 # 登入 ECR
-aws ecr get-login-password --region ap-northeast-1 | \
+aws ecr get-login-password --profile srec --region ap-northeast-1 | \
   docker login --username AWS --password-stdin <帳號>.dkr.ecr.ap-northeast-1.amazonaws.com
 
 # Build 並推送
@@ -266,22 +270,51 @@ docker push "${ECR_URI}:${SHA_TAG}"
 ### Step 5：手動觸發測試
 
 ```bash
+# 查詢 Security Group ID（首次執行前先確認）
+aws ec2 describe-security-groups \
+  --profile srec \
+  --filters "Name=group-name,Values=line-report-task-sg" \
+  --query "SecurityGroups[0].GroupId" \
+  --output text
+# → sg-085e167d9f0748a1e
+```
+
+```bash
 # 手動執行快照（立即觸發）
 aws ecs run-task \
+  --profile srec \
   --cluster line-report \
   --task-definition line-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}" \
   --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","snapshot"]}]}'
 
-# 手動執行回報
+# 手動執行回報（需先有上月 prevMonthFinal 快照，否則報錯屬正常）
 aws ecs run-task \
+  --profile srec \
   --cluster line-report \
   --task-definition line-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}" \
   --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","report","--month=prev"]}]}'
 ```
+
+> **注意**：首次部署後 DynamoDB 是空的，`report` task 會因找不到上月 `prevMonthFinal` 快照而失敗——這是正常行為。需等每日快照累積到月底跨月時，系統才會自動標記 `prevMonthFinal`，之後 report 才能正常執行。
+
+### Step 6：確認快照寫入（觸發後等 1-2 分鐘）
+
+```bash
+# 查詢當月快照（月份請替換為當前年月，格式 YYYY-MM）
+aws dynamodb query \
+  --profile srec \
+  --table-name usage_snapshots \
+  --key-condition-expression "monthKey = :mk" \
+  --expression-attribute-values '{":mk":{"S":"2026-03"}}' \
+  --no-scan-index-forward \
+  --max-items 3
+```
+
+有資料出現（`Count > 0`）即代表 snapshot 成功、整個 AWS 部署驗證完成。
 
 ---
 
@@ -328,54 +361,28 @@ git push origin v20260225-1
 
 ## 回滾到上一版本
 
+EventBridge Scheduler 設定為自動使用最新 ACTIVE Task Definition revision，因此回滾只需重新部署舊版 image tag，CDK 會建立指向舊 image 的新 revision，Scheduler 自動切換，**不需手動更新 Scheduler**。
+
 ### Step 1：確認可用的舊版 tag
 
 ```bash
 aws ecr describe-images \
+  --profile srec \
   --repository-name line-report \
   --query 'sort_by(imageDetails, &imagePushedAt)[*].{Tags:imageTags,PushedAt:imagePushedAt}' \
   --output table
 ```
 
-### Step 2：建立回滾版本的 Task Definition
+### Step 2：修改 `.env` 的 `IMAGE_TAG` 並重新部署
 
 ```bash
-TARGET_TAG="v20260224-1"   # 替換為目標版本
-ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
-FAMILY="line-report"
+# .env
+IMAGE_TAG=v2.0.1   # 替換為目標版本
 
-aws ecs describe-task-definition --task-definition $FAMILY \
-  --query 'taskDefinition' \
-  | jq --arg img "$ECR_URI:$TARGET_TAG" \
-       'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
-        .containerDefinitions[0].image = $img' \
-  > /tmp/td-rollback.json
-
-NEW_ARN=$(aws ecs register-task-definition \
-  --cli-input-json file:///tmp/td-rollback.json \
-  --query 'taskDefinition.taskDefinitionArn' --output text)
-
-echo "已建立回滾 Task Definition: $NEW_ARN"
+npm run deploy
 ```
 
-### Step 3：更新 EventBridge Scheduler 指向回滾版本
-
-```bash
-# 確認目前 Scheduler 指向的版本
-aws scheduler get-schedule --name line-report-daily-snapshot \
-  --query 'Target.EcsParameters.TaskDefinitionArn'
-
-# 更新 Scheduler（daily-snapshot 與 monthly-report 皆需更新）
-# 注意：--target 參數需填入完整 JSON，請先取得當前設定再更新
-aws scheduler get-schedule --name line-report-daily-snapshot > /tmp/current-schedule.json
-
-# 參考 /tmp/current-schedule.json 修改 TaskDefinitionArn 後執行 update-schedule
-```
-
-> **提示**：若使用 CDK 管理，可直接重新部署指定舊版本：
-> ```bash
-> cd iac && cdk deploy LineReportEcsStack --context imageTag=$TARGET_TAG
-> ```
+CDK 會為 `line-report` Task Definition 建立新的 revision（使用舊 image），EventBridge Scheduler 下次觸發時自動使用該 revision。
 
 ---
 
@@ -404,12 +411,14 @@ npm run deploy
 ```bash
 # 取得 SNS Topic ARN
 TOPIC_ARN=$(aws cloudformation describe-stacks \
+  --profile srec \
   --stack-name LineReportMonitoringStack \
   --query "Stacks[0].Outputs[?OutputKey=='AlarmTopicArn'].OutputValue" \
   --output text)
 
 # 新增 Email 訂閱
 aws sns subscribe \
+  --profile srec \
   --topic-arn "$TOPIC_ARN" \
   --protocol email \
   --notification-endpoint "you@example.com"
@@ -422,13 +431,13 @@ aws sns subscribe \
 ### 查看現有訂閱
 
 ```bash
-aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN"
+aws sns list-subscriptions-by-topic --profile srec --topic-arn "$TOPIC_ARN"
 ```
 
 ### 取消訂閱
 
 ```bash
-aws sns unsubscribe --subscription-arn "<SubscriptionArn>（從上方指令取得）"
+aws sns unsubscribe --profile srec --subscription-arn "<SubscriptionArn>（從上方指令取得）"
 ```
 
 ---
@@ -467,10 +476,11 @@ fields @timestamp, action, jobId, status, totalUsage
 ### AWS CLI
 
 ```bash
-# 查詢最近 1 小時的 log
+# 查詢最近 1 小時的 log（macOS 用 python3 計算時間戳）
 aws logs filter-log-events \
+  --profile srec \
   --log-group-name /ecs/line-report \
-  --start-time $(date -d '1 hour ago' +%s000) \
+  --start-time $(python3 -c "import time; print(int((time.time()-3600)*1000))") \
   --filter-pattern "ERROR"
 ```
 
@@ -481,11 +491,13 @@ aws logs filter-log-events \
 ### 查詢最近快照
 
 ```bash
+# 月份格式 YYYY-MM，替換為當前月份
 aws dynamodb query \
+  --profile srec \
   --table-name usage_snapshots \
   --key-condition-expression "monthKey = :mk" \
-  --expression-attribute-values '{":mk":{"S":"2026-02"}}' \
-  --scan-index-forward false \
+  --expression-attribute-values '{":mk":{"S":"2026-03"}}' \
+  --no-scan-index-forward \
   --max-items 5
 ```
 
@@ -493,18 +505,20 @@ aws dynamodb query \
 
 ```bash
 aws dynamodb query \
+  --profile srec \
   --table-name usage_snapshots \
   --key-condition-expression "monthKey = :mk" \
   --filter-expression "isPrevMonthFinal = :t" \
-  --expression-attribute-values '{":mk":{"S":"2026-01"},":t":{"BOOL":true}}'
+  --expression-attribute-values '{":mk":{"S":"2026-02"},":t":{"BOOL":true}}'
 ```
 
 ### 查詢 job_runs 執行紀錄
 
 ```bash
 aws dynamodb get-item \
+  --profile srec \
   --table-name job_runs \
-  --key '{"jobId":{"S":"snapshot#2026-02-25"}}'
+  --key '{"jobId":{"S":"snapshot#2026-03-03"}}'
 ```
 
 ---

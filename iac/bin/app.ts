@@ -39,12 +39,6 @@ const ecsStack = new EcsStack(app, 'LineReportEcsStack', {
   logGroup: monitoringStack.logGroup,
 });
 
-new SchedulerStack(app, 'LineReportSchedulerStack', {
-  env,
-  taskDefinition: ecsStack.taskDefinition,
-  cluster: ecsStack.cluster,
-  securityGroup: ecsStack.taskSecurityGroup,
-  subnets: ecsStack.taskSubnets,
-});
+new SchedulerStack(app, 'LineReportSchedulerStack', { env });
 
 app.synth();

@@ -5,8 +5,8 @@
  * 透過 npm run deploy 呼叫（--env-file=.env 已在 package.json 設定）。
  *
  * 使用方式：
- *   npm run deploy                              # 部署全部 stack
- *   npm run deploy -- --stacks LineReportSchedulerStack   # 只部署排程
+ *   npm run deploy                                       # 部署全部 stack（--all）
+ *   npm run deploy -- LineReportSchedulerStack           # 只部署指定 stack
  *
  * 支援的 .env 欄位：
  *   IMAGE_TAG        Docker image tag（必填）
@@ -57,8 +57,12 @@ const profileArgs = process.env.AWS_PROFILE
   ? ['--profile', process.env.AWS_PROFILE]
   : [];
 
-// CLI 追加參數（如 --stacks xxx）
+// CLI 追加參數（如 stack 名稱）
+// 例：npm run deploy -- LineReportSchedulerStack   ← 只部署該 stack
+//     npm run deploy                               ← 部署全部（--all）
 const extraArgs = process.argv.slice(2);
+// 判斷是否有傳入 stack 名稱（不以 -- 開頭的參數視為 stack 名稱）
+const hasStackNames = extraArgs.some((a) => !a.startsWith('--'));
 
 // fileURLToPath 正確處理路徑中的中文/特殊字元
 const iacDir = fileURLToPath(new URL('../iac', import.meta.url));
@@ -66,7 +70,8 @@ const iacDir = fileURLToPath(new URL('../iac', import.meta.url));
 const cdkBin = resolve(iacDir, 'node_modules', '.bin', 'cdk');
 
 const cdkArgs = [
-  'deploy', '--all',
+  'deploy',
+  ...(hasStackNames ? [] : ['--all']),  // 指定 stack 名稱時不加 --all
   ...profileArgs,
   ...contextArgs,
   ...extraArgs,

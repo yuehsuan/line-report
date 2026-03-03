@@ -1,23 +1,39 @@
 import * as cdk from 'aws-cdk-lib';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
-import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { buildReportCron, buildSnapshotCron } from './cron-builder';
 
-export interface SchedulerStackProps extends cdk.StackProps {
-  taskDefinition: ecs.FargateTaskDefinition;
-  cluster: ecs.Cluster;
-  securityGroup: ec2.SecurityGroup;
-  subnets: ec2.SubnetSelection;
-}
-
+// SchedulerStack 不依賴任何 EcsStack CDK 物件，完全從已知常數或 lookup 取值。
+// 這樣 CDK 不會在 CloudFormation 產生跨 stack 的 export/import，
+// 也不會把 EcsStack 列為 SchedulerStack 的 dependency，
+// 因此每次更新 imageTag 不會再遇到「export in use」的部署卡住問題。
 export class SchedulerStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: SchedulerStackProps) {
+  constructor(scope: Construct, id: string, props: cdk.StackProps) {
     super(scope, id, props);
 
-    const { taskDefinition, cluster, securityGroup, subnets } = props;
+    // VPC lookup（context 已在首次 cdk synth 時快取）
+    const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
+
+    // Security Group lookup by name（首次 synth 會查 AWS API 並快取至 cdk.context.json）
+    const securityGroup = ec2.SecurityGroup.fromLookupByName(
+      this, 'TaskSg', 'line-report-task-sg', vpc,
+    );
+
+    // Public subnet IDs（從 context 快取取出，與 EcsStack 相同的 VPC）
+    const resolvedSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds;
+
+    // 固定名稱 cluster ARN，不引用 EcsStack 物件
+    const clusterArn = `arn:aws:ecs:${this.region}:${this.account}:cluster/line-report`;
+
+    // 固定 family 名稱：不帶版本號，EventBridge 自動選最新 ACTIVE revision
+    const taskDefFamily = 'line-report';
+    const taskDefinitionArn = `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDefFamily}`;
+    const taskDefinitionArnWildcard = `${taskDefinitionArn}:*`;
+    // Role ARN 用固定名稱建構
+    const executionRoleArn = `arn:aws:iam::${this.account}:role/line-report-task-execution-role`;
+    const taskRoleArn      = `arn:aws:iam::${this.account}:role/line-report-task-role`;
 
     // ── Scheduler 執行 Role ───────────────────────────────────────
     const schedulerRole = new iam.Role(this, 'SchedulerRole', {
@@ -29,25 +45,18 @@ export class SchedulerStack extends cdk.Stack {
       sid: 'EcsRunTask',
       effect: iam.Effect.ALLOW,
       actions: ['ecs:RunTask'],
-      resources: [taskDefinition.taskDefinitionArn],
+      resources: [taskDefinitionArnWildcard],
     }));
 
     schedulerRole.addToPolicy(new iam.PolicyStatement({
       sid: 'IamPassRole',
       effect: iam.Effect.ALLOW,
       actions: ['iam:PassRole'],
-      resources: [
-        taskDefinition.executionRole!.roleArn,
-        taskDefinition.taskRole.roleArn,
-      ],
+      resources: [executionRoleArn, taskRoleArn],
     }));
 
-    // 解析 subnet IDs
-    const vpc = cluster.vpc;
-    const resolvedSubnets = vpc.selectSubnets(subnets).subnetIds;
-
     const ecsParameters: scheduler.CfnSchedule.EcsParametersProperty = {
-      taskDefinitionArn: taskDefinition.taskDefinitionArn,
+      taskDefinitionArn,
       launchType: 'FARGATE',
       networkConfiguration: {
         awsvpcConfiguration: {
@@ -83,7 +92,7 @@ export class SchedulerStack extends cdk.Stack {
       state: 'ENABLED',
       flexibleTimeWindow: { mode: 'OFF' },
       target: {
-        arn: cluster.clusterArn,
+        arn: clusterArn,
         roleArn: schedulerRole.roleArn,
         // CDK 型別定義缺少 overrides，但 CloudFormation 支援；用 double cast 繞過
         ecsParameters: {
@@ -113,7 +122,7 @@ export class SchedulerStack extends cdk.Stack {
       state: 'ENABLED',
       flexibleTimeWindow: { mode: 'OFF' },
       target: {
-        arn: cluster.clusterArn,
+        arn: clusterArn,
         roleArn: schedulerRole.roleArn,
         // CDK 型別定義缺少 overrides，但 CloudFormation 支援；用 double cast 繞過
         ecsParameters: {
