@@ -10,13 +10,15 @@
     "deploy": "cdk deploy --all --require-approval never",
     "deploy:stack": "cdk deploy",
     "diff": "cdk diff --all",
-    "synth": "cdk synth --all"
+    "synth": "cdk synth --all",
+    "test": "tsc && node --test dist/__tests__/cron-builder.test.js"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.177.0",
     "constructs": "^10.4.2"
   },
   "devDependencies": {
+    "@types/node": "^25.3.3",
     "aws-cdk": "^2.177.0",
     "typescript": "^5.7.3"
   }

@@ -204,7 +204,7 @@ npm run deploy -- --stacks LineReportSchedulerStack
 | `IMAGE_TAG` | Docker image tag（必填）| — |
 | `REPORT_MODE` | 回報模式：`date` 或 `weekday` | `date` |
 | `REPORT_DAY` | 每月固定日（`REPORT_MODE=date` 時用，1-28）| `11` |
-| `REPORT_WEEK` | 第幾週（`REPORT_MODE=weekday` 時用，1-5）| `2` |
+| `REPORT_WEEK` | 第幾週（`REPORT_MODE=weekday` 時用，**建議 1-4**）| `2` |
 | `REPORT_WEEKDAY` | 星期幾（`REPORT_MODE=weekday` 時用，1=一…5=五）| `3` |
 | `REPORT_HOUR` | 每月回報時（台北時間）| `9` |
 | `SNAPSHOT_HOUR` | 每日快照時（台北時間）| `23` |
@@ -225,6 +225,8 @@ REPORT_WEEKDAY=3   # 1=一、2=二、3=三、4=四、5=五
 ```
 
 > **提示：** 若固定日期（如 11 日）遇到週末，建議改用 `REPORT_MODE=weekday`，可確保回報一定落在工作日。
+>
+> **⚠️ 注意：** `REPORT_WEEK` 建議使用 **1-4**，避免設為 5。部分月份（如 2 月）不存在第 5 個指定星期幾，EventBridge Scheduler 將**靜悄悄跳過該月**，不報錯也不補發。
 
 ### Step 3：填入 SSM Parameter Store 機密值
 
