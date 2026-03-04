@@ -2,61 +2,6 @@
 
 LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署於 AWS ECS Fargate，以 EventBridge Scheduler 排程每日快照與每月回報。
 
----
-
-## 技術概覽
-
-### 使用語言與技術
-
-| 層次 | 技術 |
-|---|---|
-| 應用程式 | JavaScript（Node.js 20，ES Modules） |
-| 基礎設施即程式碼（IaC） | TypeScript + AWS CDK v2 |
-| 容器化 | Docker（`node:20-alpine`，多階段建置） |
-| CI/CD | GitHub Actions |
-| 測試 | Node.js built-in `node:test` |
-
-### 部署平台
-
-**AWS**（區域：`ap-northeast-1` 東京）
-
-### 使用的 AWS 服務
-
-| 服務 | 用途 |
-|---|---|
-| **ECS Fargate** | 執行 Docker 容器，無需管理伺服器 |
-| **ECR** | 儲存 Docker Image |
-| **DynamoDB** | 儲存每日用量快照（`usage_snapshots`）與執行紀錄（`job_runs`） |
-| **SSM Parameter Store** | 加密儲存 LINE Token、推播目標、計費設定等機密 |
-| **EventBridge Scheduler** | 排程觸發每日快照（23:55 台北時間）與每月回報 |
-| **CloudWatch Logs** | 收集容器輸出的 JSON 結構化 Log |
-| **CloudWatch Alarm + SNS** | 偵測到 ERROR Log 時，寄 Email 告警 |
-
-### 整體架構（簡覽）
-
-```
-EventBridge Scheduler
-  │
-  ├─ 每日 23:55 (台北時間)
-  │       └──→ ECS Fargate：snapshot task
-  │                 ├── 呼叫 LINE API 取得當月訊息用量
-  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
-  │
-  └─ 每月 (預設 11 日 09:00)
-          └──→ ECS Fargate：report task
-                    ├── 從 DynamoDB 讀取上月最終快照
-                    ├── 計算加購費用
-                    └── 推播報告到 LINE 群組
-
-SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
-CloudWatch Logs      ←──  ECS 容器輸出 JSON log
-CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
-```
-
-**用一句話理解：** 排程器每天自動紀錄 LINE 訊息用量；每個月從紀錄中計算費用，並自動推播報告到指定的 LINE 群組。
-
----
-
 ## 功能說明
 
 - **每日快照**（23:55 Asia/Taipei）：呼叫 LINE Messaging API 取得當月用量，存入 DynamoDB
@@ -110,25 +55,22 @@ line-report/
 cp .env.example .env
 ```
 
-
-| 變數                          | 說明                            | 預設值               | 必填        |
-| --------------------------- | ----------------------------- | ----------------- | --------- |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token     | —                 | ✅         |
-| `LINE_TARGETS`              | 推播目標（逗號分隔；C=群組、U=個人、R=聊天室）    | —                 | ✅         |
-| `FREE_QUOTA`                | 每月免費訊息額度（則）                   | `0`               |           |
-| `PRICING_MODEL`             | 計費模式：`single` 或 `tiers`       | `single`          |           |
-| `PLAN_FEE`                  | 月方案費（元），每月固定計收；設 0 表示不計入      | `0`               |           |
-| `SINGLE_UNIT_PRICE`         | single 模式：每則單價（TWD）           | `0.2`             |           |
-| `TIERS_JSON`                | tiers 模式：級距 JSON（見下方說明）       | —                 | tiers 時必填 |
-| `AWS_REGION`                | AWS 區域                        | `ap-northeast-1`  |           |
-| `DDB_TABLE_SNAPSHOTS`       | DynamoDB 快照表名                 | `usage_snapshots` |           |
-| `DDB_TABLE_RUNS`            | DynamoDB 執行紀錄表名               | `job_runs`        |           |
-| `CURRENCY`                  | 貨幣符號                          | `TWD`             |           |
-| `LOG_LEVEL`                 | pino log level                | `info`            |           |
-| `TZ`                        | 容器時區（影響系統預設時區）                | `Asia/Taipei`     |           |
-| `DRY_RUN`                   | `true` 時跳過 LINE 實際推播          | —                 |           |
-| `AWS_ENDPOINT_URL`          | 本機測試用 DynamoDB Local endpoint | —                 |           |
-
+| 變數 | 說明 | 預設值 | 必填 |
+|---|---|---|---|
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token | — | ✅ |
+| `LINE_GROUP_ID` | 推播目標群組 ID | — | ✅ |
+| `FREE_QUOTA` | 每月免費訊息額度（則） | `0` | |
+| `PRICING_MODEL` | 計費模式：`single` 或 `tiers` | `single` | |
+| `SINGLE_UNIT_PRICE` | single 模式：每則單價（TWD） | `0.2` | |
+| `TIERS_JSON` | tiers 模式：級距 JSON（見下方說明） | — | tiers 時必填 |
+| `AWS_REGION` | AWS 區域 | `ap-northeast-1` | |
+| `DDB_TABLE_SNAPSHOTS` | DynamoDB 快照表名 | `usage_snapshots` | |
+| `DDB_TABLE_RUNS` | DynamoDB 執行紀錄表名 | `job_runs` | |
+| `CURRENCY` | 貨幣符號 | `TWD` | |
+| `LOG_LEVEL` | pino log level | `info` | |
+| `TZ` | 容器時區（影響系統預設時區） | `Asia/Taipei` | |
+| `DRY_RUN` | `true` 時跳過 LINE 實際推播 | — | |
+| `AWS_ENDPOINT_URL` | 本機測試用 DynamoDB Local endpoint | — | |
 
 ### TIERS_JSON 格式範例
 
@@ -162,26 +104,25 @@ cp .env.example .env
 ### 3. 執行快照
 
 ```bash
-npm run snapshot
+node src/index.js snapshot
 ```
 
 ### 4. 執行回報（前月）
 
 ```bash
-npm run report
+node src/index.js report --month=prev
 ```
 
 ### 5. 執行回報（指定月份）
 
 ```bash
-node --env-file=.env src/index.js report --month=2026-01
+node src/index.js report --month=2026-01
 ```
 
 ### 6. DRY_RUN 模式（跳過 LINE push，僅印出訊息）
 
 ```bash
-# 在 .env 中設定 DRY_RUN=true 後執行
-npm run report
+DRY_RUN=true node src/index.js report --month=prev
 ```
 
 ---
@@ -252,25 +193,23 @@ cdk bootstrap aws://<帳號ID>/<區域>
 # 一鍵部署全部 stack（從 .env 讀取所有設定）
 npm run deploy
 
-# 只部署特定 stack（stack 名稱直接當參數）
-npm run deploy -- LineReportSchedulerStack
+# 只部署特定 stack
+npm run deploy -- --stacks LineReportSchedulerStack
 ```
 
-`**.env` 排程相關欄位（deploy 時生效）：**
+**`.env` 排程相關欄位（deploy 時生效）：**
 
-
-| 欄位                | 說明                                       | 預設值    |
-| ----------------- | ---------------------------------------- | ------ |
-| `IMAGE_TAG`       | Docker image tag（必填）                     | —      |
-| `REPORT_MODE`     | 回報模式：`date` 或 `weekday`                  | `date` |
-| `REPORT_DAY`      | 每月固定日（`REPORT_MODE=date` 時用，1-28）        | `11`   |
-| `REPORT_WEEK`     | 第幾週（`REPORT_MODE=weekday` 時用，**建議 1-4**） | `2`    |
-| `REPORT_WEEKDAY`  | 星期幾（`REPORT_MODE=weekday` 時用，1=一…5=五）    | `3`    |
-| `REPORT_HOUR`     | 每月回報時（台北時間）                              | `9`    |
-| `SNAPSHOT_HOUR`   | 每日快照時（台北時間）                              | `23`   |
-| `SNAPSHOT_MINUTE` | 每日快照分                                    | `55`   |
-| `ALARM_EMAIL`     | 告警 Email（見下方說明）                          | —      |
-
+| 欄位 | 說明 | 預設值 |
+|------|------|--------|
+| `IMAGE_TAG` | Docker image tag（必填）| — |
+| `REPORT_MODE` | 回報模式：`date` 或 `weekday` | `date` |
+| `REPORT_DAY` | 每月固定日（`REPORT_MODE=date` 時用，1-28）| `11` |
+| `REPORT_WEEK` | 第幾週（`REPORT_MODE=weekday` 時用，**建議 1-4**）| `2` |
+| `REPORT_WEEKDAY` | 星期幾（`REPORT_MODE=weekday` 時用，1=一…5=五）| `3` |
+| `REPORT_HOUR` | 每月回報時（台北時間）| `9` |
+| `SNAPSHOT_HOUR` | 每日快照時（台北時間）| `23` |
+| `SNAPSHOT_MINUTE` | 每日快照分 | `55` |
+| `ALARM_EMAIL` | 告警 Email（見下方說明）| — |
 
 **回報排程設定範例：**
 
@@ -289,111 +228,60 @@ REPORT_WEEKDAY=3   # 1=一、2=二、3=三、4=四、5=五
 >
 > **⚠️ 注意：** `REPORT_WEEK` 建議使用 **1-4**，避免設為 5。部分月份（如 2 月）不存在第 5 個指定星期幾，EventBridge Scheduler 將**靜悄悄跳過該月**，不報錯也不補發。
 
-### Step 3：同步 .env 設定到 SSM Parameter Store
-
-ECS Fargate 容器啟動時會從 SSM 自動注入環境變數，因此 `.env` 修改後必須同步到 SSM 才會生效。
-
-> **`.env` 與 SSM 的分工：**
->
-> | | `.env` | SSM Parameter Store |
-> |---|---|---|
-> | 用途 | 本機 `npm run snapshot` / `npm run report` | ECS Fargate 容器執行時 |
-> | 誰讀 | `node --env-file=.env` | ECS secrets 注入（容器啟動時） |
-> | 安全性 | 存在本機，`.gitignore` 保護，不進 git | 加密儲存於 AWS |
-> | **修改後需要** | 直接生效 | **執行 `npm run sync-ssm`** |
-
-使用同步腳本（從 `.env` 讀取，不會將機密值存入 shell history）：
+### Step 3：填入 SSM Parameter Store 機密值
 
 ```bash
-# 同步全部參數（首次部署，或多個欄位同時修改時）
-npm run sync-ssm
-
-# 只同步 LINE_TARGETS（例如新增/移除推播對象）
-npm run sync-ssm:targets
-
-# 只同步 LINE_CHANNEL_ACCESS_TOKEN（token 換新時）
-npm run sync-ssm:token
-```
-
-確認填入成功（印出 token 前 6 字，確認非 PLACEHOLDER）：
-
-```bash
-aws ssm get-parameter \
-  --profile srec \
+# LINE Channel Access Token（SecureString）
+aws ssm put-parameter \
   --name /line-report/LINE_CHANNEL_ACCESS_TOKEN \
-  --with-decryption \
-  --query 'Parameter.Value' \
-  --output text | cut -c1-6
+  --type SecureString \
+  --value "YOUR_LINE_TOKEN" \
+  --overwrite
+
+# LINE 推播目標（逗號分隔，C 開頭=群組，U 開頭=個人）
+aws ssm put-parameter \
+  --name /line-report/LINE_TARGETS \
+  --type String \
+  --value "C你的groupId,U你的userId" \
+  --overwrite
 ```
 
 ### Step 4：首次推送 Docker Image
 
 ```bash
-# 先查出 AWS 帳號 ID，後續指令統一使用
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile srec --query 'Account' --output text)
-echo "帳號 ID：${AWS_ACCOUNT_ID}"
-
 # 登入 ECR
-aws ecr get-login-password --profile srec --region ap-northeast-1 | \
-  docker login --username AWS --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com"
+aws ecr get-login-password --region ap-northeast-1 | \
+  docker login --username AWS --password-stdin <帳號>.dkr.ecr.ap-northeast-1.amazonaws.com
 
-# Build 並推送（VERSION_TAG 請與 .env 的 IMAGE_TAG 一致）
-ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com/line-report"
-VERSION_TAG="v2.3.0"
+# Build 並推送
+ECR_URI="<帳號>.dkr.ecr.ap-northeast-1.amazonaws.com/line-report"
+VERSION_TAG="v20260225-1"
+SHA_TAG="sha-$(git rev-parse --short HEAD)"
 
-# ⚠️ Apple Silicon Mac（M1/M2/M3）必須加 --platform linux/amd64
-# ECS Fargate 執行環境為 x86_64，若用預設 arm64 build 會導致 CannotPullContainerError
-docker build --platform linux/amd64 -t "${ECR_URI}:${VERSION_TAG}" .
+docker build -t "${ECR_URI}:${VERSION_TAG}" -t "${ECR_URI}:${SHA_TAG}" .
 docker push "${ECR_URI}:${VERSION_TAG}"
+docker push "${ECR_URI}:${SHA_TAG}"
 ```
 
 ### Step 5：手動觸發測試
 
 ```bash
-# 查詢 Security Group ID（首次執行前先確認）
-aws ec2 describe-security-groups \
-  --profile srec \
-  --filters "Name=group-name,Values=line-report-task-sg" \
-  --query "SecurityGroups[0].GroupId" \
-  --output text
-# → sg-085e167d9f0748a1e
-```
-
-```bash
 # 手動執行快照（立即觸發）
-# command 已 bake in task definition，不需要 --overrides
 aws ecs run-task \
-  --profile srec \
   --cluster line-report \
-  --task-definition line-report-snapshot \
+  --task-definition line-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}"
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","snapshot"]}]}'
 
-# 手動執行回報（需先有上月 prevMonthFinal 快照，否則報錯屬正常）
+# 手動執行回報
 aws ecs run-task \
-  --profile srec \
   --cluster line-report \
-  --task-definition line-report-report \
+  --task-definition line-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}"
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
+  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","report","--month=prev"]}]}'
 ```
-
-> **注意**：首次部署後 DynamoDB 是空的，`report` task 會因找不到上月 `prevMonthFinal` 快照而失敗——這是正常行為。需等每日快照累積到月底跨月時，系統才會自動標記 `prevMonthFinal`，之後 report 才能正常執行。
-
-### Step 6：確認快照寫入（觸發後等 1-2 分鐘）
-
-```bash
-# 查詢當月快照（月份請替換為當前年月，格式 YYYY-MM）
-aws dynamodb query \
-  --profile srec \
-  --table-name usage_snapshots \
-  --key-condition-expression "monthKey = :mk" \
-  --expression-attribute-values '{":mk":{"S":"2026-03"}}' \
-  --no-scan-index-forward \
-  --max-items 3
-```
-
-有資料出現（`Count > 0`）即代表 snapshot 成功、整個 AWS 部署驗證完成。
 
 ---
 
@@ -403,13 +291,11 @@ aws dynamodb query \
 
 在 GitHub Repository Settings → Secrets and Variables 設定：
 
-
-| 名稱               | 類型       | 說明                                           |
-| ---------------- | -------- | -------------------------------------------- |
-| `AWS_ROLE_ARN`   | Secret   | OIDC Role ARN（格式：`arn:aws:iam::帳號:role/xxx`） |
-| `ECR_REPOSITORY` | Secret   | ECR 儲存庫名稱（如 `line-report`，不含 registry）       |
-| `AWS_REGION`     | Variable | AWS 區域（如 `ap-northeast-1`）                   |
-
+| 名稱 | 類型 | 說明 |
+|---|---|---|
+| `AWS_ROLE_ARN` | Secret | OIDC Role ARN（格式：`arn:aws:iam::帳號:role/xxx`）|
+| `ECR_REPOSITORY` | Secret | ECR 儲存庫名稱（如 `line-report`，不含 registry）|
+| `AWS_REGION` | Variable | AWS 區域（如 `ap-northeast-1`）|
 
 ### OIDC Role 設定
 
@@ -440,49 +326,56 @@ git push origin v20260225-1
 
 ---
 
-## 日常維運：修改設定的工作流程
-
-### 改了 `.env` 之後，要做什麼？
-
-| 修改的欄位 | 需要執行 | 說明 |
-|---|---|---|
-| `LINE_TARGETS`（推播對象） | `npm run sync-ssm:targets` | SSM 更新後下次 ECS task 啟動即生效 |
-| `LINE_CHANNEL_ACCESS_TOKEN`（token 換新） | `npm run sync-ssm:token` | 同上 |
-| `FREE_QUOTA`、`PRICING_MODEL`、`PLAN_FEE` 等計費設定 | `npm run sync-ssm` | 同步全部參數 |
-| `IMAGE_TAG`（新版本部署） | `npm run deploy` | 更新 Task Definition |
-| `REPORT_DAY`、`SNAPSHOT_HOUR` 等排程設定 | `npm run deploy` | 更新 EventBridge Scheduler |
-| `src/` 程式碼修改 | build & push image → `npm run deploy` | 需重建 Docker image |
-
-> **重要：** `npm run deploy` 和 `npm run sync-ssm` 是完全獨立的操作。
-> - `deploy` 只更新 AWS 基礎設施（CloudFormation），**不會更新 SSM 的值**
-> - `sync-ssm` 只更新 SSM 的業務設定值，**不會動 CloudFormation**
-
----
-
 ## 回滾到上一版本
-
-EventBridge Scheduler 設定為自動使用最新 ACTIVE Task Definition revision，因此回滾只需重新部署舊版 image tag，CDK 會為 `line-report-snapshot` 和 `line-report-report` 兩個 Task Definition 各自建立指向舊 image 的新 revision，Scheduler 下次觸發時自動切換，**不需手動更新 Scheduler**。
 
 ### Step 1：確認可用的舊版 tag
 
 ```bash
 aws ecr describe-images \
-  --profile srec \
   --repository-name line-report \
   --query 'sort_by(imageDetails, &imagePushedAt)[*].{Tags:imageTags,PushedAt:imagePushedAt}' \
   --output table
 ```
 
-### Step 2：修改 `.env` 的 `IMAGE_TAG` 並重新部署
+### Step 2：建立回滾版本的 Task Definition
 
 ```bash
-# .env
-IMAGE_TAG=v2.0.1   # 替換為目標版本
+TARGET_TAG="v20260224-1"   # 替換為目標版本
+ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
+FAMILY="line-report"
 
-npm run deploy
+aws ecs describe-task-definition --task-definition $FAMILY \
+  --query 'taskDefinition' \
+  | jq --arg img "$ECR_URI:$TARGET_TAG" \
+       'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
+        .containerDefinitions[0].image = $img' \
+  > /tmp/td-rollback.json
+
+NEW_ARN=$(aws ecs register-task-definition \
+  --cli-input-json file:///tmp/td-rollback.json \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+
+echo "已建立回滾 Task Definition: $NEW_ARN"
 ```
 
-CDK 會為 `line-report-snapshot` 和 `line-report-report` 兩個 Task Definition 各自建立新的 revision（使用舊 image），EventBridge Scheduler 下次觸發時自動使用該 revision。
+### Step 3：更新 EventBridge Scheduler 指向回滾版本
+
+```bash
+# 確認目前 Scheduler 指向的版本
+aws scheduler get-schedule --name line-report-daily-snapshot \
+  --query 'Target.EcsParameters.TaskDefinitionArn'
+
+# 更新 Scheduler（daily-snapshot 與 monthly-report 皆需更新）
+# 注意：--target 參數需填入完整 JSON，請先取得當前設定再更新
+aws scheduler get-schedule --name line-report-daily-snapshot > /tmp/current-schedule.json
+
+# 參考 /tmp/current-schedule.json 修改 TaskDefinitionArn 後執行 update-schedule
+```
+
+> **提示**：若使用 CDK 管理，可直接重新部署指定舊版本：
+> ```bash
+> cd iac && cdk deploy LineReportEcsStack --context imageTag=$TARGET_TAG
+> ```
 
 ---
 
@@ -511,14 +404,12 @@ npm run deploy
 ```bash
 # 取得 SNS Topic ARN
 TOPIC_ARN=$(aws cloudformation describe-stacks \
-  --profile srec \
   --stack-name LineReportMonitoringStack \
   --query "Stacks[0].Outputs[?OutputKey=='AlarmTopicArn'].OutputValue" \
   --output text)
 
 # 新增 Email 訂閱
 aws sns subscribe \
-  --profile srec \
   --topic-arn "$TOPIC_ARN" \
   --protocol email \
   --notification-endpoint "you@example.com"
@@ -531,24 +422,22 @@ aws sns subscribe \
 ### 查看現有訂閱
 
 ```bash
-aws sns list-subscriptions-by-topic --profile srec --topic-arn "$TOPIC_ARN"
+aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN"
 ```
 
 ### 取消訂閱
 
 ```bash
-aws sns unsubscribe --profile srec --subscription-arn "<SubscriptionArn>（從上方指令取得）"
+aws sns unsubscribe --subscription-arn "<SubscriptionArn>（從上方指令取得）"
 ```
 
 ---
 
 ### 告警觸發條件
 
-
-| 告警名稱                      | 條件                        | Log Group          |
-| ------------------------- | ------------------------- | ------------------ |
+| 告警名稱 | 條件 | Log Group |
+|---------|------|-----------|
 | `line-report-error-alarm` | 5 分鐘內 `level=error` ≥ 1 次 | `/ecs/line-report` |
-
 
 > **常見觸發原因：** prevMonthFinal 快照不存在、LINE API 失敗、DynamoDB 連線逾時。  
 > 錯誤詳情可至 CloudWatch Logs `line-report-error-alarm` 查詢。
@@ -578,11 +467,10 @@ fields @timestamp, action, jobId, status, totalUsage
 ### AWS CLI
 
 ```bash
-# 查詢最近 1 小時的 log（macOS 用 python3 計算時間戳）
+# 查詢最近 1 小時的 log
 aws logs filter-log-events \
-  --profile srec \
   --log-group-name /ecs/line-report \
-  --start-time $(python3 -c "import time; print(int((time.time()-3600)*1000))") \
+  --start-time $(date -d '1 hour ago' +%s000) \
   --filter-pattern "ERROR"
 ```
 
@@ -593,13 +481,11 @@ aws logs filter-log-events \
 ### 查詢最近快照
 
 ```bash
-# 月份格式 YYYY-MM，替換為當前月份
 aws dynamodb query \
-  --profile srec \
   --table-name usage_snapshots \
   --key-condition-expression "monthKey = :mk" \
-  --expression-attribute-values '{":mk":{"S":"2026-03"}}' \
-  --no-scan-index-forward \
+  --expression-attribute-values '{":mk":{"S":"2026-02"}}' \
+  --scan-index-forward false \
   --max-items 5
 ```
 
@@ -607,74 +493,19 @@ aws dynamodb query \
 
 ```bash
 aws dynamodb query \
-  --profile srec \
   --table-name usage_snapshots \
   --key-condition-expression "monthKey = :mk" \
   --filter-expression "isPrevMonthFinal = :t" \
-  --expression-attribute-values '{":mk":{"S":"2026-02"},":t":{"BOOL":true}}'
+  --expression-attribute-values '{":mk":{"S":"2026-01"},":t":{"BOOL":true}}'
 ```
 
 ### 查詢 job_runs 執行紀錄
 
 ```bash
 aws dynamodb get-item \
-  --profile srec \
   --table-name job_runs \
-  --key '{"jobId":{"S":"snapshot#2026-03-03"}}'
+  --key '{"jobId":{"S":"snapshot#2026-02-25"}}'
 ```
-
----
-
-## Runbook：手動補救 prevMonthFinal 封存失敗
-
-若某月 `prevMonthFinal` 因故未被自動標記（例如跨月當天的 job_run 更新失敗），`report` task 執行時會報錯退出。請依以下步驟手動補救：
-
-### Step 1：確認上月最後一筆快照的 ts
-
-```bash
-# 將 YYYY-MM 替換為需要補封存的月份（例如上個月）
-MONTH="2026-02"
-
-aws dynamodb query \
-  --profile srec \
-  --table-name usage_snapshots \
-  --key-condition-expression "monthKey = :mk" \
-  --expression-attribute-values "{\":mk\":{\"S\":\"${MONTH}\"}}" \
-  --no-scan-index-forward \
-  --max-items 1 \
-  --query 'Items[0].ts.S' \
-  --output text
-```
-
-記下輸出的 `ts` 值（格式如 `2026-02-28T15:55:00.000Z`）。
-
-### Step 2：手動標記 isPrevMonthFinal=true
-
-```bash
-MONTH="2026-02"
-TS="2026-02-28T15:55:00.000Z"   # 替換為 Step 1 查到的 ts
-
-aws dynamodb update-item \
-  --profile srec \
-  --table-name usage_snapshots \
-  --key "{\"monthKey\":{\"S\":\"${MONTH}\"},\"ts\":{\"S\":\"${TS}\"}}" \
-  --update-expression "SET isPrevMonthFinal = :t" \
-  --expression-attribute-values '{":t":{"BOOL":true}}'
-```
-
-### Step 3：確認標記成功
-
-```bash
-aws dynamodb query \
-  --profile srec \
-  --table-name usage_snapshots \
-  --key-condition-expression "monthKey = :mk" \
-  --filter-expression "isPrevMonthFinal = :t" \
-  --expression-attribute-values "{\":mk\":{\"S\":\"${MONTH}\"},\":t\":{\"BOOL\":true}}" \
-  --query 'Items[*].{ts:ts.S,totalUsage:totalUsage.N}'
-```
-
-確認有回傳資料後，即可重新觸發 `report` task。
 
 ---
 
@@ -692,8 +523,7 @@ EventBridge Scheduler
                                           ├── calculateFee()
                                           └── POST LINE /message/push
 
-SSM Parameter Store /line-report/*  ──→  ECS secrets 注入（容器啟動時自動設為環境變數）
-                                         LINE token, group ID, pricing config
+SSM Parameter Store /line-report/*  ──→  LINE token, group ID, pricing config
 CloudWatch Logs /ecs/line-report    ──→  JSON structured logs (pino)
 CloudWatch Alarm + SNS              ──→  Error alert
 ```
@@ -706,4 +536,3 @@ CloudWatch Alarm + SNS              ──→  Error alert
 - `isPrevMonthFinal` 快照一旦標記，建議不要手動修改（影響回報計算）
 - `cdk destroy` 不會刪除 DynamoDB 資料表（`RemovalPolicy.RETAIN`），請手動清理
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
-

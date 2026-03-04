@@ -58,6 +58,43 @@ export class MonitoringStack extends cdk.Stack {
 
     errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alarmTopic));
 
+    // ── Log Metric Filter：快照成功計數（含 idempotent 略過）────────────────
+    // 兩種訊息皆視為「今日快照已成功」，否則 idempotent 略過時會誤觸 snapshot-missing 告警
+    const snapshotSuccessFilter = new logs.MetricFilter(this, 'SnapshotSuccessFilter', {
+      logGroup: this.logGroup,
+      metricNamespace: 'LineReport',
+      metricName: 'SnapshotSuccessCount',
+      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', '快照執行完成'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    const snapshotIdempotentFilter = new logs.MetricFilter(this, 'SnapshotIdempotentFilter', {
+      logGroup: this.logGroup,
+      metricNamespace: 'LineReport',
+      metricName: 'SnapshotSuccessCount',
+      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', '今日快照已成功完成，略過（idempotent）'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // ── CloudWatch Alarm：26 小時無快照成功即告警（偵測容器完全沒執行）──
+    // treatMissingData=BREACHING 確保若 log group 完全沒有資料也會觸發告警
+    const snapshotMissingAlarm = new cloudwatch.Alarm(this, 'SnapshotMissingAlarm', {
+      alarmName: 'line-report-snapshot-missing',
+      alarmDescription: '超過 26 小時未收到快照成功 log，任務可能未執行（容器啟動失敗或靜默錯誤）',
+      metric: snapshotSuccessFilter.metric({
+        period: cdk.Duration.hours(26),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+
+    snapshotMissingAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alarmTopic));
+
     new cdk.CfnOutput(this, 'LogGroupName', {
       value: this.logGroup.logGroupName,
       exportName: 'LineReportLogGroupName',

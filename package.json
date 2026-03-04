@@ -1,6 +1,6 @@
 {
   "name": "line-report",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "LINE 官方帳號訊息用量快照與費用估算自動化服務",
   "type": "module",
   "main": "src/index.js",
@@ -21,8 +21,8 @@
     "sync-ssm:token": "bash scripts/sync-ssm.sh token"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.731.0",
-    "@aws-sdk/lib-dynamodb": "^3.731.0",
+    "@aws-sdk/client-dynamodb": "^3.1000.0",
+    "@aws-sdk/lib-dynamodb": "^3.1000.0",
     "axios": "^1.7.9",
     "luxon": "^3.5.0",
     "pino": "^9.6.0",

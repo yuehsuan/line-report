@@ -11,7 +11,7 @@
     "deploy:stack": "cdk deploy",
     "diff": "cdk diff --all",
     "synth": "cdk synth --all",
-    "test": "tsc && node --test dist/__tests__/cron-builder.test.js"
+    "test": "tsc && node --test dist/unit-tests/cron-builder.test.js"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.177.0",

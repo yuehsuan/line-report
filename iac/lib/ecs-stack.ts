@@ -139,6 +139,10 @@ export class EcsStack extends cdk.Stack {
         ssm.StringParameter.fromStringParameterName(this, 'SsmCurrency',
           '/line-report/CURRENCY')
       ),
+      TIERS_JSON: ecs.Secret.fromSsmParameter(
+        ssm.StringParameter.fromStringParameterName(this, 'SsmTiersJson',
+          '/line-report/TIERS_JSON')
+      ),
     };
 
     const sharedEnv = {

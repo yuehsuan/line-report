@@ -2,6 +2,10 @@ import * as cdk from 'aws-cdk-lib';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
 import { buildReportCron, buildSnapshotCron } from './cron-builder';
 
@@ -9,9 +13,15 @@ import { buildReportCron, buildSnapshotCron } from './cron-builder';
 // 這樣 CDK 不會在 CloudFormation 產生跨 stack 的 export/import，
 // 也不會把 EcsStack 列為 SchedulerStack 的 dependency，
 // 因此每次更新 imageTag 不會再遇到「export in use」的部署卡住問題。
+export interface SchedulerStackProps extends cdk.StackProps {
+  alarmTopicArn?: string;
+}
+
 export class SchedulerStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: cdk.StackProps) {
+  constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
+
+    const { alarmTopicArn } = props;
 
     // VPC lookup（context 已在首次 cdk synth 時快取）
     const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
@@ -27,9 +37,10 @@ export class SchedulerStack extends cdk.Stack {
     // 固定名稱 cluster ARN
     const clusterArn = `arn:aws:ecs:${this.region}:${this.account}:cluster/line-report`;
 
-    // 兩個獨立的 task definition family，各自 bake in 對應指令
-    // CloudFormation 的 EventBridge Scheduler EcsParameters 不支援 task override，
-    // 因此用兩個 task definition 取代，每個直接在 container command 設定指令。
+    // 兩個獨立的 task definition family，各自 bake in 對應指令。
+    // CloudFormation EcsParameters 規格上支援 TaskOverride，但 CDK L1 型別未定義此屬性；
+    // 即使透過 addPropertyOverride() 注入，也會被 CloudFormation schema 驗證擋住。
+    // 改以兩個 task definition 各自 bake in 指令，架構更清晰且無 type hack。
     const snapshotTaskDefArn = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-snapshot`;
     const reportTaskDefArn   = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-report`;
 
@@ -59,6 +70,38 @@ export class SchedulerStack extends cdk.Stack {
       actions: ['iam:PassRole'],
       resources: [executionRoleArn, taskRoleArn],
     }));
+
+    // ── Dead Letter Queue（接收 RunTask API 呼叫失敗超過 retry 次數的事件）──
+    const dlq = new sqs.Queue(this, 'SchedulerDlq', {
+      queueName: 'line-report-scheduler-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+    });
+
+    schedulerRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SqsSendMessage',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [dlq.queueArn],
+    }));
+
+    // DLQ 有訊息即告警（透過 MonitoringStack 的 SNS topic，或建立獨立 alarm）
+    const dlqAlarm = new cloudwatch.Alarm(this, 'DlqAlarm', {
+      alarmName: 'line-report-scheduler-dlq-alarm',
+      alarmDescription: 'EventBridge Scheduler 排程呼叫失敗（超過 retry 次數），請檢查 DLQ 訊息',
+      metric: dlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    if (alarmTopicArn) {
+      const alarmTopic = sns.Topic.fromTopicArn(this, 'AlarmTopic', alarmTopicArn);
+      dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    }
 
     const networkConfig = {
       awsvpcConfiguration: {
@@ -103,6 +146,7 @@ export class SchedulerStack extends cdk.Stack {
           maximumRetryAttempts: 2,
           maximumEventAgeInSeconds: 600,
         },
+        deadLetterConfig: { arn: dlq.queueArn },
       },
     });
 
@@ -127,6 +171,7 @@ export class SchedulerStack extends cdk.Stack {
           maximumRetryAttempts: 2,
           maximumEventAgeInSeconds: 1800,
         },
+        deadLetterConfig: { arn: dlq.queueArn },
       },
     });
 

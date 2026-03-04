@@ -40,6 +40,12 @@ if (reportMode !== 'date' && reportMode !== 'weekday') {
   process.exit(1);
 }
 
+const reportDay = parseInt(process.env.REPORT_DAY || '11', 10);
+if (isNaN(reportDay) || reportDay < 1 || reportDay > 28) {
+  console.error(`[cdk-deploy] 錯誤：REPORT_DAY 必須為 1–28（避免 2 月沒有 29–31 日），目前值：${process.env.REPORT_DAY}`);
+  process.exit(1);
+}
+
 const contextArgs = [
   `imageTag=${imageTag}`,
   `reportMode=${reportMode}`,
@@ -72,6 +78,7 @@ const cdkBin = resolve(iacDir, 'node_modules', '.bin', 'cdk');
 const cdkArgs = [
   'deploy',
   ...(hasStackNames ? [] : ['--all']),  // 指定 stack 名稱時不加 --all
+  '--require-approval', 'never',
   ...profileArgs,
   ...contextArgs,
   ...extraArgs,

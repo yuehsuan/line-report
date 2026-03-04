@@ -113,7 +113,10 @@ export async function getJobRun(jobId) {
  * @param {string} jobId
  * @param {Object} fields
  */
+const JOB_RUN_TTL_SECONDS = 90 * 24 * 60 * 60;
+
 export async function upsertJobRun(jobId, fields) {
-  const item = { jobId, ...fields, updatedAt: new Date().toISOString() };
+  const ttl = Math.floor(Date.now() / 1000) + JOB_RUN_TTL_SECONDS;
+  const item = { jobId, ...fields, updatedAt: new Date().toISOString(), ttl };
   await dbPut(TABLE_RUNS(), item);
 }

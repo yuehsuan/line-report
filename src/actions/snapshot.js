@@ -1,6 +1,6 @@
 import { getNowTaipei, getMonthKey, getPrevMonthKey, getDateKey, toUtcIso } from '../lib/date.js';
 import { getConsumption } from '../lib/lineApi.js';
-import { writeSnapshot, querySnapshots, markPrevMonthFinal, getJobRun, upsertJobRun } from '../lib/storage.js';
+import { writeSnapshot, querySnapshots, getPrevMonthFinalSnapshot, markPrevMonthFinal, getJobRun, upsertJobRun } from '../lib/storage.js';
 import { createLogger } from '../lib/logger.js';
 
 const log = createLogger({ action: 'snapshot' });
@@ -31,6 +31,9 @@ export async function runSnapshot() {
     // 呼叫 LINE API 取得用量
     const consumptionData = await getConsumption();
     const { totalUsage } = consumptionData;
+    if (typeof totalUsage !== 'number') {
+      throw new Error(`LINE API 回傳的 totalUsage 格式異常：${JSON.stringify(consumptionData)}`);
+    }
     log.info({ totalUsage }, '取得 LINE consumption（近似值）');
 
     // 寫入快照
@@ -65,20 +68,19 @@ export async function runSnapshot() {
 }
 
 /**
- * 偵測是否跨月，若跨月則標記上月最終快照
+ * 確認上月是否已封存，若未封存則嘗試標記最終快照。
+ * 不依賴當月快照數量判斷，直接查詢上月 prevMonthFinal 狀態，
+ * 避免「本月快照寫入成功但 job_run 更新失敗」時上月永遠無法封存的邊界案例。
  */
 async function detectAndSealPrevMonth(currentMonthKey, now) {
   const prevMonthKey = getPrevMonthKey(now);
 
-  // 取當前月份是否有任何快照（若沒有，代表本月第一次執行）
-  const currentMonthItems = await querySnapshots(currentMonthKey, false);
-  if (currentMonthItems.length > 0) {
-    // 本月已有快照，無需檢查跨月
+  const existing = await getPrevMonthFinalSnapshot(prevMonthKey);
+  if (existing) {
     return;
   }
 
-  // 本月第一次執行 → 確認上月是否已封存
-  log.info({ prevMonthKey }, '本月第一次執行，嘗試封存上月 prevMonthFinal');
+  log.info({ prevMonthKey }, '上月尚未封存，嘗試標記 prevMonthFinal');
   const sealed = await markPrevMonthFinal(prevMonthKey);
   if (sealed) {
     log.info({ prevMonthKey, ts: sealed.ts, totalUsage: sealed.totalUsage }, '上月封存完成');

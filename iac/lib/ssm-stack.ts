@@ -18,13 +18,19 @@ export class SsmStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // SecureString：LINE Channel Access Token（機密，請手動更新值）
-    new ssm.StringParameter(this, 'LineChannelAccessToken', {
-      parameterName: '/line-report/LINE_CHANNEL_ACCESS_TOKEN',
-      stringValue: 'PLACEHOLDER_UPDATE_MANUALLY',
-      description: 'LINE Messaging API Channel Access Token（機密）',
-      tier: ssm.ParameterTier.STANDARD,
-    });
+    // LINE_CHANNEL_ACCESS_TOKEN：SecureString，必須純手動管理
+    // CloudFormation（AWS::SSM::Parameter）硬性不支援 SecureString 類型，
+    // 因此本 Stack 不管理此參數，以下指令建立或更新：
+    //
+    //   # 首次建立：
+    //   aws ssm put-parameter --profile srec \
+    //     --name /line-report/LINE_CHANNEL_ACCESS_TOKEN \
+    //     --type SecureString --value "<真實 token>"
+    //
+    //   # 後續更新：
+    //   aws ssm put-parameter --profile srec \
+    //     --name /line-report/LINE_CHANNEL_ACCESS_TOKEN \
+    //     --type SecureString --value "<新 token>" --overwrite
 
     // LINE 推播目標（逗號分隔，支援群組/個人/聊天室）
     new ssm.StringParameter(this, 'LineTargets', {
@@ -63,6 +69,22 @@ export class SsmStack extends cdk.Stack {
       parameterName: '/line-report/TIERS_JSON',
       stringValue: '[{"upTo":10000,"price":0.2},{"upTo":50000,"price":0.18},{"upTo":null,"price":0.16}]',
       description: 'tiers 模式：級距計費 JSON',
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    // 月租費（single / tiers 模式均適用）
+    new ssm.StringParameter(this, 'PlanFee', {
+      parameterName: '/line-report/PLAN_FEE',
+      stringValue: '1200',
+      description: '月租費（TWD）',
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    // 幣別
+    new ssm.StringParameter(this, 'Currency', {
+      parameterName: '/line-report/CURRENCY',
+      stringValue: 'TWD',
+      description: '幣別',
       tier: ssm.ParameterTier.STANDARD,
     });
 

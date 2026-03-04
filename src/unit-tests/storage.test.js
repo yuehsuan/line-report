@@ -167,4 +167,15 @@ describe('upsertJobRun', () => {
     assert.equal(calls[0].args[0].input.Item.jobId, 'snapshot#2026-02-25');
     assert.equal(calls[0].args[0].input.Item.status, 'running');
   });
+
+  test('PutCommand 應包含 ttl 欄位（Unix timestamp，約 90 天後）', async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const beforeTs = Math.floor(Date.now() / 1000) + 90 * 24 * 60 * 60 - 5;
+    await upsertJobRun('snapshot#2026-03-03', { status: 'running' });
+    const afterTs = Math.floor(Date.now() / 1000) + 90 * 24 * 60 * 60 + 5;
+
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    assert.ok(typeof item.ttl === 'number', 'ttl 應為 number');
+    assert.ok(item.ttl >= beforeTs && item.ttl <= afterTs, 'ttl 應在 90 天後的合理範圍');
+  });
 });

@@ -20,3 +20,9 @@ iac/lib/*.js
 # Cursor IDE
 .cursor/
 *.pkg
+
+# 本地規劃與審查文件（不追蹤進 git，以免與程式碼混淆）
+doc/plan/
+
+# Bug 修復驗證腳本（本地執行，不進 git）
+**/local-bug-check/

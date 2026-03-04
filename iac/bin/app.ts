@@ -39,6 +39,9 @@ const ecsStack = new EcsStack(app, 'LineReportEcsStack', {
   logGroup: monitoringStack.logGroup,
 });
 
-new SchedulerStack(app, 'LineReportSchedulerStack', { env });
+new SchedulerStack(app, 'LineReportSchedulerStack', {
+  env,
+  alarmTopicArn: monitoringStack.alarmTopic.topicArn,
+});
 
 app.synth();

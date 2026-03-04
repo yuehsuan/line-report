@@ -41,23 +41,6 @@ function handleAxiosError(err, context) {
 }
 
 /**
- * 取得當月訊息配額目標上限
- * GET /v2/bot/message/quota
- * @returns {Promise<{type: string, value: number}>}
- */
-export async function getQuota() {
-  try {
-    const { data } = await axios.get(`${BASE_URL}/quota`, {
-      headers: buildHeaders(),
-    });
-    log.debug({ quota: data }, 'getQuota 成功');
-    return data;
-  } catch (err) {
-    handleAxiosError(err, 'getQuota');
-  }
-}
-
-/**
  * 取得當月已用量（近似值）
  * GET /v2/bot/message/quota/consumption
  * @returns {Promise<{totalUsage: number}>}
