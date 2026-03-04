@@ -1,6 +1,6 @@
 {
   "name": "line-report",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "LINE 官方帳號訊息用量快照與費用估算自動化服務",
   "type": "module",
   "main": "src/index.js",

@@ -2,6 +2,61 @@
 
 LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署於 AWS ECS Fargate，以 EventBridge Scheduler 排程每日快照與每月回報。
 
+---
+
+## 技術概覽
+
+### 使用語言與技術
+
+| 層次 | 技術 |
+|---|---|
+| 應用程式 | JavaScript（Node.js 20，ES Modules） |
+| 基礎設施即程式碼（IaC） | TypeScript + AWS CDK v2 |
+| 容器化 | Docker（`node:20-alpine`，多階段建置） |
+| CI/CD | GitHub Actions |
+| 測試 | Node.js built-in `node:test` |
+
+### 部署平台
+
+**AWS**（區域：`ap-northeast-1` 東京）
+
+### 使用的 AWS 服務
+
+| 服務 | 用途 |
+|---|---|
+| **ECS Fargate** | 執行 Docker 容器，無需管理伺服器 |
+| **ECR** | 儲存 Docker Image |
+| **DynamoDB** | 儲存每日用量快照（`usage_snapshots`）與執行紀錄（`job_runs`） |
+| **SSM Parameter Store** | 加密儲存 LINE Token、推播目標、計費設定等機密 |
+| **EventBridge Scheduler** | 排程觸發每日快照（23:55 台北時間）與每月回報 |
+| **CloudWatch Logs** | 收集容器輸出的 JSON 結構化 Log |
+| **CloudWatch Alarm + SNS** | 偵測到 ERROR Log 時，寄 Email 告警 |
+
+### 整體架構（簡覽）
+
+```
+EventBridge Scheduler
+  │
+  ├─ 每日 23:55 (台北時間)
+  │       └──→ ECS Fargate：snapshot task
+  │                 ├── 呼叫 LINE API 取得當月訊息用量
+  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
+  │
+  └─ 每月 (預設 11 日 09:00)
+          └──→ ECS Fargate：report task
+                    ├── 從 DynamoDB 讀取上月最終快照
+                    ├── 計算加購費用
+                    └── 推播報告到 LINE 群組
+
+SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
+CloudWatch Logs      ←──  ECS 容器輸出 JSON log
+CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
+```
+
+**用一句話理解：** 排程器每天自動紀錄 LINE 訊息用量；每個月從紀錄中計算費用，並自動推播報告到指定的 LINE 群組。
+
+---
+
 ## 功能說明
 
 - **每日快照**（23:55 Asia/Taipei）：呼叫 LINE Messaging API 取得當月用量，存入 DynamoDB
@@ -27,20 +82,25 @@ line-report/
 │   │   ├── logger.js         # pino logger（JSON）
 │   │   ├── pricing.js        # 計費模型
 │   │   └── storage.js        # 快照 CRUD + prevMonthFinal
-│   └── __tests__/            # 單元測試 / 整合測試
+│   └── unit-tests/           # 單元測試 / 整合測試
 ├── scripts/
-│   └── dry-run.js            # 本機驗證腳本
+│   ├── cdk-deploy.js         # CDK 一鍵部署腳本
+│   ├── dry-run.js            # 本機驗證腳本（DynamoDB Local + snapshot/report）
+│   ├── sync-ssm.sh           # 同步本機 .env 到 SSM Parameter
+│   └── e2e-tests/            # E2E / smoke test 腳本
 ├── iac/                      # AWS CDK（TypeScript）
 │   ├── bin/app.ts
-│   └── lib/
-│       ├── database-stack.ts
-│       ├── ecr-stack.ts
-│       ├── ecs-stack.ts
-│       ├── monitoring-stack.ts
-│       ├── scheduler-stack.ts
-│       └── ssm-stack.ts
+│   ├── lib/
+│   │   ├── database-stack.ts
+│   │   ├── ecr-stack.ts
+│   │   ├── ecs-stack.ts
+│   │   ├── monitoring-stack.ts
+│   │   ├── scheduler-stack.ts
+│   │   └── ssm-stack.ts
+│   └── unit-tests/           # CDK 層級測試
 ├── .github/workflows/
 │   └── deploy.yml            # GitHub Actions CI/CD
+├── doc/                      # 需求規劃、架構圖、ADR、Runbook
 ├── Dockerfile
 └── .env.example
 ```
@@ -58,9 +118,10 @@ cp .env.example .env
 | 變數 | 說明 | 預設值 | 必填 |
 |---|---|---|---|
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token | — | ✅ |
-| `LINE_GROUP_ID` | 推播目標群組 ID | — | ✅ |
-| `FREE_QUOTA` | 每月免費訊息額度（則） | `0` | |
+| `LINE_TARGETS` | 推播目標 ID 列表（逗號分隔；C=群組、U=個人、R=聊天室） | — | ✅ |
+| `FREE_QUOTA` | 每月免費訊息額度（則） | `1000` | |
 | `PRICING_MODEL` | 計費模式：`single` 或 `tiers` | `single` | |
+| `PLAN_FEE` | 方案月費（固定月租，0 表示不計入） | `0` | |
 | `SINGLE_UNIT_PRICE` | single 模式：每則單價（TWD） | `0.2` | |
 | `TIERS_JSON` | tiers 模式：級距 JSON（見下方說明） | — | tiers 時必填 |
 | `AWS_REGION` | AWS 區域 | `ap-northeast-1` | |
@@ -70,7 +131,10 @@ cp .env.example .env
 | `LOG_LEVEL` | pino log level | `info` | |
 | `TZ` | 容器時區（影響系統預設時區） | `Asia/Taipei` | |
 | `DRY_RUN` | `true` 時跳過 LINE 實際推播 | — | |
+| `AWS_PROFILE` | AWS SSO profile 名稱（使用 IAM key 可留空） | — | |
 | `AWS_ENDPOINT_URL` | 本機測試用 DynamoDB Local endpoint | — | |
+| `IMAGE_TAG` | Docker image tag（部署時必填，禁止使用 latest） | — | 部署時必填 |
+| `ALARM_EMAIL` | 告警 Email（CloudWatch Alarm → SNS） | — | 選填 |
 
 ### TIERS_JSON 格式範例
 
@@ -104,25 +168,25 @@ cp .env.example .env
 ### 3. 執行快照
 
 ```bash
-node src/index.js snapshot
+npm run snapshot
 ```
 
 ### 4. 執行回報（前月）
 
 ```bash
-node src/index.js report --month=prev
+npm run report
 ```
 
 ### 5. 執行回報（指定月份）
 
 ```bash
-node src/index.js report --month=2026-01
+node --env-file=.env src/index.js report --month=2026-01
 ```
 
 ### 6. DRY_RUN 模式（跳過 LINE push，僅印出訊息）
 
 ```bash
-DRY_RUN=true node src/index.js report --month=prev
+DRY_RUN=true npm run report
 ```
 
 ---
@@ -513,19 +577,21 @@ aws dynamodb get-item \
 
 ```
 EventBridge Scheduler
-  ├── 每日 23:55 Asia/Taipei  ──→  ECS Fargate (snapshot task)
-  │                                    ├── GET LINE /quota/consumption
-  │                                    ├── DynamoDB PutItem (usage_snapshots)
-  │                                    └── DynamoDB PutItem (job_runs)
   │
-  └── 每月 11 日 09:00 Asia/Taipei  ──→  ECS Fargate (report task)
-                                          ├── DynamoDB Query (prevMonthFinal)
-                                          ├── calculateFee()
-                                          └── POST LINE /message/push
+  ├─ 每日 23:55 (台北時間)
+  │       └──→ ECS Fargate：snapshot task
+  │                 ├── 呼叫 LINE API 取得當月訊息用量
+  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
+  │
+  └─ 每月 (預設 11 日 09:00)
+          └──→ ECS Fargate：report task
+                    ├── 從 DynamoDB 讀取上月最終快照
+                    ├── 計算加購費用
+                    └── 推播報告到 LINE 群組
 
-SSM Parameter Store /line-report/*  ──→  LINE token, group ID, pricing config
-CloudWatch Logs /ecs/line-report    ──→  JSON structured logs (pino)
-CloudWatch Alarm + SNS              ──→  Error alert
+SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
+CloudWatch Logs      ←──  ECS 容器輸出 JSON log
+CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 ```
 
 ---
