@@ -2,6 +2,61 @@
 
 LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署於 AWS ECS Fargate，以 EventBridge Scheduler 排程每日快照與每月回報。
 
+---
+
+## 技術概覽
+
+### 使用語言與技術
+
+| 層次 | 技術 |
+|---|---|
+| 應用程式 | JavaScript（Node.js 20，ES Modules） |
+| 基礎設施即程式碼（IaC） | TypeScript + AWS CDK v2 |
+| 容器化 | Docker（`node:20-alpine`，多階段建置） |
+| CI/CD | GitHub Actions |
+| 測試 | Node.js built-in `node:test` |
+
+### 部署平台
+
+**AWS**（區域：`ap-northeast-1` 東京）
+
+### 使用的 AWS 服務
+
+| 服務 | 用途 |
+|---|---|
+| **ECS Fargate** | 執行 Docker 容器，無需管理伺服器 |
+| **ECR** | 儲存 Docker Image |
+| **DynamoDB** | 儲存每日用量快照（`usage_snapshots`）與執行紀錄（`job_runs`） |
+| **SSM Parameter Store** | 加密儲存 LINE Token、推播目標、計費設定等機密 |
+| **EventBridge Scheduler** | 排程觸發每日快照（23:55 台北時間）與每月回報 |
+| **CloudWatch Logs** | 收集容器輸出的 JSON 結構化 Log |
+| **CloudWatch Alarm + SNS** | 偵測到 ERROR Log 時，寄 Email 告警 |
+
+### 整體架構（簡覽）
+
+```
+EventBridge Scheduler
+  │
+  ├─ 每日 23:55 (台北時間)
+  │       └──→ ECS Fargate：snapshot task
+  │                 ├── 呼叫 LINE API 取得當月訊息用量
+  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
+  │
+  └─ 每月 (預設 11 日 09:00)
+          └──→ ECS Fargate：report task
+                    ├── 從 DynamoDB 讀取上月最終快照
+                    ├── 計算加購費用
+                    └── 推播報告到 LINE 群組
+
+SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
+CloudWatch Logs      ←──  ECS 容器輸出 JSON log
+CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
+```
+
+**用一句話理解：** 排程器每天自動紀錄 LINE 訊息用量；每個月從紀錄中計算費用，並自動推播報告到指定的 LINE 群組。
+
+---
+
 ## 功能說明
 
 - **每日快照**（23:55 Asia/Taipei）：呼叫 LINE Messaging API 取得當月用量，存入 DynamoDB
@@ -284,7 +339,7 @@ aws ecr get-login-password --profile srec --region ap-northeast-1 | \
 
 # Build 並推送（VERSION_TAG 請與 .env 的 IMAGE_TAG 一致）
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.ap-northeast-1.amazonaws.com/line-report"
-VERSION_TAG="v2.1.0"
+VERSION_TAG="v2.3.0"
 
 # ⚠️ Apple Silicon Mac（M1/M2/M3）必須加 --platform linux/amd64
 # ECS Fargate 執行環境為 x86_64，若用預設 arm64 build 會導致 CannotPullContainerError
@@ -306,22 +361,21 @@ aws ec2 describe-security-groups \
 
 ```bash
 # 手動執行快照（立即觸發）
+# command 已 bake in task definition，不需要 --overrides
 aws ecs run-task \
   --profile srec \
   --cluster line-report \
-  --task-definition line-report \
+  --task-definition line-report-snapshot \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","snapshot"]}]}'
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}"
 
 # 手動執行回報（需先有上月 prevMonthFinal 快照，否則報錯屬正常）
 aws ecs run-task \
   --profile srec \
   --cluster line-report \
-  --task-definition line-report \
+  --task-definition line-report-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","report","--month=prev"]}]}'
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-06eb77ca7b4b4df06],securityGroups=[sg-085e167d9f0748a1e],assignPublicIp=ENABLED}"
 ```
 
 > **注意**：首次部署後 DynamoDB 是空的，`report` task 會因找不到上月 `prevMonthFinal` 快照而失敗——這是正常行為。需等每日快照累積到月底跨月時，系統才會自動標記 `prevMonthFinal`，之後 report 才能正常執行。
@@ -407,7 +461,7 @@ git push origin v20260225-1
 
 ## 回滾到上一版本
 
-EventBridge Scheduler 設定為自動使用最新 ACTIVE Task Definition revision，因此回滾只需重新部署舊版 image tag，CDK 會建立指向舊 image 的新 revision，Scheduler 自動切換，**不需手動更新 Scheduler**。
+EventBridge Scheduler 設定為自動使用最新 ACTIVE Task Definition revision，因此回滾只需重新部署舊版 image tag，CDK 會為 `line-report-snapshot` 和 `line-report-report` 兩個 Task Definition 各自建立指向舊 image 的新 revision，Scheduler 下次觸發時自動切換，**不需手動更新 Scheduler**。
 
 ### Step 1：確認可用的舊版 tag
 
@@ -428,7 +482,7 @@ IMAGE_TAG=v2.0.1   # 替換為目標版本
 npm run deploy
 ```
 
-CDK 會為 `line-report` Task Definition 建立新的 revision（使用舊 image），EventBridge Scheduler 下次觸發時自動使用該 revision。
+CDK 會為 `line-report-snapshot` 和 `line-report-report` 兩個 Task Definition 各自建立新的 revision（使用舊 image），EventBridge Scheduler 下次觸發時自動使用該 revision。
 
 ---
 
@@ -568,6 +622,59 @@ aws dynamodb get-item \
   --table-name job_runs \
   --key '{"jobId":{"S":"snapshot#2026-03-03"}}'
 ```
+
+---
+
+## Runbook：手動補救 prevMonthFinal 封存失敗
+
+若某月 `prevMonthFinal` 因故未被自動標記（例如跨月當天的 job_run 更新失敗），`report` task 執行時會報錯退出。請依以下步驟手動補救：
+
+### Step 1：確認上月最後一筆快照的 ts
+
+```bash
+# 將 YYYY-MM 替換為需要補封存的月份（例如上個月）
+MONTH="2026-02"
+
+aws dynamodb query \
+  --profile srec \
+  --table-name usage_snapshots \
+  --key-condition-expression "monthKey = :mk" \
+  --expression-attribute-values "{\":mk\":{\"S\":\"${MONTH}\"}}" \
+  --no-scan-index-forward \
+  --max-items 1 \
+  --query 'Items[0].ts.S' \
+  --output text
+```
+
+記下輸出的 `ts` 值（格式如 `2026-02-28T15:55:00.000Z`）。
+
+### Step 2：手動標記 isPrevMonthFinal=true
+
+```bash
+MONTH="2026-02"
+TS="2026-02-28T15:55:00.000Z"   # 替換為 Step 1 查到的 ts
+
+aws dynamodb update-item \
+  --profile srec \
+  --table-name usage_snapshots \
+  --key "{\"monthKey\":{\"S\":\"${MONTH}\"},\"ts\":{\"S\":\"${TS}\"}}" \
+  --update-expression "SET isPrevMonthFinal = :t" \
+  --expression-attribute-values '{":t":{"BOOL":true}}'
+```
+
+### Step 3：確認標記成功
+
+```bash
+aws dynamodb query \
+  --profile srec \
+  --table-name usage_snapshots \
+  --key-condition-expression "monthKey = :mk" \
+  --filter-expression "isPrevMonthFinal = :t" \
+  --expression-attribute-values "{\":mk\":{\"S\":\"${MONTH}\"},\":t\":{\"BOOL\":true}}" \
+  --query 'Items[*].{ts:ts.S,totalUsage:totalUsage.N}'
+```
+
+確認有回傳資料後，即可重新觸發 `report` task。
 
 ---
 
