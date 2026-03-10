@@ -4,11 +4,14 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 
 export class MonitoringStack extends cdk.Stack {
   public readonly logGroup: logs.LogGroup;
   public readonly alarmTopic: sns.Topic;
+  public readonly successTopic?: sns.Topic;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -30,6 +33,51 @@ export class MonitoringStack extends cdk.Stack {
     const alarmEmail = this.node.tryGetContext('alarmEmail') as string | undefined;
     if (alarmEmail) {
       this.alarmTopic.addSubscription(new subscriptions.EmailSubscription(alarmEmail));
+    }
+
+    const dailySuccessEmail = this.node.tryGetContext('dailySuccessEmail') as string | undefined;
+    if (dailySuccessEmail) {
+      this.successTopic = new sns.Topic(this, 'SuccessTopic', {
+        topicName: 'line-report-daily-success',
+        displayName: 'LINE 用量回報服務每日成功通知',
+      });
+      this.successTopic.addSubscription(new subscriptions.EmailSubscription(dailySuccessEmail));
+
+      new events.Rule(this, 'SnapshotSuccessEmailRule', {
+        description: 'Snapshot task 成功完成時寄送每日成功通知',
+        eventPattern: {
+          source: ['aws.ecs'],
+          detailType: ['ECS Task State Change'],
+          detail: {
+            clusterArn: [cdk.Stack.of(this).formatArn({
+              service: 'ecs',
+              resource: 'cluster',
+              resourceName: 'line-report',
+            })],
+            group: ['family:line-report-snapshot'],
+            lastStatus: ['STOPPED'],
+            desiredStatus: ['STOPPED'],
+            stopCode: ['EssentialContainerExited'],
+            containers: {
+              name: ['app'],
+              exitCode: [0],
+            },
+          },
+        },
+        targets: [new targets.SnsTopic(this.successTopic, {
+          message: events.RuleTargetInput.fromObject({
+            service: 'line-report',
+            event: 'snapshot-success',
+            clusterArn: events.EventField.fromPath('$.detail.clusterArn'),
+            taskArn: events.EventField.fromPath('$.detail.taskArn'),
+            taskDefinitionArn: events.EventField.fromPath('$.detail.taskDefinitionArn'),
+            stoppedAt: events.EventField.fromPath('$.detail.stoppedAt'),
+            stoppedReason: events.EventField.fromPath('$.detail.stoppedReason'),
+            exitCode: events.EventField.fromPath('$.detail.containers[0].exitCode'),
+            image: events.EventField.fromPath('$.detail.containers[0].image'),
+          }),
+        })],
+      });
     }
 
     // ── Log Metric Filter：擷取 ERROR 等級 log ───────────────────
@@ -104,5 +152,11 @@ export class MonitoringStack extends cdk.Stack {
       value: this.alarmTopic.topicArn,
       exportName: 'LineReportAlarmTopicArn',
     });
+
+    if (this.successTopic) {
+      new cdk.CfnOutput(this, 'SuccessTopicArn', {
+        value: this.successTopic.topicArn,
+      });
+    }
   }
 }

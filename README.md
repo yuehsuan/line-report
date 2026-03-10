@@ -10,9 +10,9 @@ LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署
 
 | 層次 | 技術 |
 |---|---|
-| 應用程式 | JavaScript（Node.js 20，ES Modules） |
+| 應用程式 | JavaScript（Node.js 20+，ES Modules） |
 | 基礎設施即程式碼（IaC） | TypeScript + AWS CDK v2 |
-| 容器化 | Docker（`node:20-alpine`，多階段建置） |
+| 容器化 | Docker（`node:22-alpine`，多階段建置） |
 | CI/CD | GitHub Actions |
 | 測試 | Node.js built-in `node:test` |
 
@@ -134,7 +134,7 @@ cp .env.example .env
 | `AWS_PROFILE` | AWS SSO profile 名稱（使用 IAM key 可留空） | — | |
 | `AWS_ENDPOINT_URL` | 本機測試用 DynamoDB Local endpoint | — | |
 | `IMAGE_TAG` | Docker image tag（部署時必填，禁止使用 latest） | — | 部署時必填 |
-| `ALARM_EMAIL` | 告警 Email（CloudWatch Alarm → SNS） | — | 選填 |
+| `ALARM_EMAIL` | 告警 Email（CloudWatch Alarm → SNS） | — | 正式部署必填 |
 
 ### TIERS_JSON 格式範例
 
@@ -188,6 +188,16 @@ node --env-file=.env src/index.js report --month=2026-01
 ```bash
 DRY_RUN=true npm run report
 ```
+
+---
+
+## 部署防呆規則
+
+- 正式環境**只能**從 repo root 執行 `npm run deploy -- [StackName...]`
+- **禁止**直接進入 `iac/` 執行 `cdk deploy`；缺少 `imageTag` / `alarmEmail` context 會導致 task definition 或 alarm subscription 被錯誤收斂
+- `IMAGE_TAG` 為正式部署必填，且該 tag 必須已存在於 ECR
+- `ALARM_EMAIL` 為正式部署必填，省略會直接中止部署
+- 部署腳本會自動驗證：AWS 身分、ECR tag 存在、task definition image、Scheduler 狀態、SNS alarm subscription
 
 ---
 
@@ -333,18 +343,16 @@ docker push "${ECR_URI}:${SHA_TAG}"
 # 手動執行快照（立即觸發）
 aws ecs run-task \
   --cluster line-report \
-  --task-definition line-report \
+  --task-definition line-report-snapshot \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","snapshot"]}]}'
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}"
 
 # 手動執行回報
 aws ecs run-task \
   --cluster line-report \
-  --task-definition line-report \
+  --task-definition line-report-report \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}" \
-  --overrides '{"containerOverrides":[{"name":"app","command":["node","src/index.js","report","--month=prev"]}]}'
+  --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}"
 ```
 
 ---
@@ -360,6 +368,10 @@ aws ecs run-task \
 | `AWS_ROLE_ARN` | Secret | OIDC Role ARN（格式：`arn:aws:iam::帳號:role/xxx`）|
 | `ECR_REPOSITORY` | Secret | ECR 儲存庫名稱（如 `line-report`，不含 registry）|
 | `AWS_REGION` | Variable | AWS 區域（如 `ap-northeast-1`）|
+| `ALARM_EMAIL` | Variable | 正式環境告警收件人 Email（CI/CD 必填）|
+| `DAILY_SUCCESS_EMAIL` | Variable | 每日 snapshot 成功通知 Email（選填，臨時功能可留空）|
+
+> CI/CD 會直接呼叫 repo root 的 `scripts/cdk-deploy.js`。若缺少 `ALARM_EMAIL`，workflow 會直接失敗，避免把 SNS 告警訂閱刪掉。
 
 ### OIDC Role 設定
 
@@ -461,6 +473,8 @@ npm run deploy
 
 部署後 AWS 會寄確認信到該 Email，**必須點擊 "Confirm subscription" 連結才會收到告警**。
 
+> 若使用已確認過的同一個 Email 重新部署，subscription 會沿用既有確認狀態。
+
 ---
 
 ### 方式二：部署後手動訂閱（已部署可補設定）
@@ -502,9 +516,11 @@ aws sns unsubscribe --subscription-arn "<SubscriptionArn>（從上方指令取�
 | 告警名稱 | 條件 | Log Group |
 |---------|------|-----------|
 | `line-report-error-alarm` | 5 分鐘內 `level=error` ≥ 1 次 | `/ecs/line-report` |
+| `line-report-snapshot-missing` | 26 小時內沒有 snapshot 成功或 idempotent 成功訊號 | `/ecs/line-report` |
+| `line-report-scheduler-dlq-alarm` | Scheduler DLQ 出現訊息 | N/A |
 
-> **常見觸發原因：** prevMonthFinal 快照不存在、LINE API 失敗、DynamoDB 連線逾時。  
-> 錯誤詳情可至 CloudWatch Logs `line-report-error-alarm` 查詢。
+> **常見觸發原因：** prevMonthFinal 快照不存在、LINE API 失敗、DynamoDB 連線逾時、task definition image 不存在、Scheduler RunTask 失敗。  
+> 詳情請至 CloudWatch Alarm history、CloudWatch Logs `/ecs/line-report` 與 Scheduler DLQ 一起查。
 
 ---
 
@@ -602,3 +618,4 @@ CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 - `isPrevMonthFinal` 快照一旦標記，建議不要手動修改（影響回報計算）
 - `cdk destroy` 不會刪除 DynamoDB 資料表（`RemovalPolicy.RETAIN`），請手動清理
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
+- 正式環境若需重新部署，請確認 `.env` 內 `IMAGE_TAG` 與 `ALARM_EMAIL` 都存在，再從 repo root 執行 `npm run deploy`

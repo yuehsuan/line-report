@@ -19,21 +19,24 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
 
 jobs:
-  build-and-push:
-    name: Build Docker Image & Push to ECR
+  build-and-deploy:
+    name: Build Image And Deploy Stacks
     runs-on: ubuntu-latest
 
     outputs:
       version_tag: ${{ steps.tags.outputs.version_tag }}
       sha_tag: ${{ steps.tags.outputs.sha_tag }}
-      new_task_def_arn: ${{ steps.update-task-def.outputs.task_def_arn }}
 
     steps:
-      # ── Step 1：Checkout ─────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Step 2：產生兩個明確版本 tag（禁用 latest）────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - name: Generate image tags
         id: tags
         run: |
@@ -46,7 +49,6 @@ jobs:
           echo "SHA_TAG=${SHA_TAG}" >> "$GITHUB_ENV"
           echo "生成版本 tag: ${VERSION_TAG}  SHA tag: ${SHA_TAG}"
 
-      # ── Step 3：AWS OIDC 認證（不使用 long-lived keys）────────────
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -54,12 +56,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LineReport
 
-      # ── Step 4：ECR Login ─────────────────────────────────────────
       - name: Login to Amazon ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ── Step 5：Docker Build（同時打上兩個 tag，禁用 latest）────────
       - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -73,64 +73,48 @@ jobs:
             .
           echo "Build 完成：${IMAGE_BASE}:${VERSION_TAG} 及 ${IMAGE_BASE}:${SHA_TAG}"
 
-      # ── Step 6：Push VERSION_TAG ──────────────────────────────────
       - name: Push version tag
         run: |
           docker push "${IMAGE_BASE}:${VERSION_TAG}"
           echo "已推送: ${IMAGE_BASE}:${VERSION_TAG}"
 
-      # ── Step 7：Push SHA_TAG ──────────────────────────────────────
       - name: Push SHA tag
         run: |
           docker push "${IMAGE_BASE}:${SHA_TAG}"
           echo "已推送: ${IMAGE_BASE}:${SHA_TAG}"
 
-      # ── Step 8：更新 ECS Task Definition 使用明確版本 tag ──────────
-      - name: Update ECS Task Definition image
-        id: update-task-def
+      - name: Validate deploy configuration
         env:
-          TASK_DEF_FAMILY: line-report
+          ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
         run: |
-          NEW_IMAGE="${IMAGE_BASE}:${VERSION_TAG}"
-          echo "更新 Task Definition image 為: ${NEW_IMAGE}"
+          if [[ -z "${ALARM_EMAIL}" ]]; then
+            echo "缺少 Repository Variable: ALARM_EMAIL"
+            exit 1
+          fi
 
-          # 取得當前 Task Definition JSON
-          CURRENT_DEF=$(aws ecs describe-task-definition \
-            --task-definition "${TASK_DEF_FAMILY}" \
-            --query 'taskDefinition' \
-            --output json)
+      - name: Install root dependencies
+        run: npm ci
 
-          # 替換 image 並移除唯讀欄位
-          NEW_DEF=$(echo "${CURRENT_DEF}" \
-            | jq --arg img "${NEW_IMAGE}" \
-                 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
-                  .containerDefinitions[0].image = $img')
+      - name: Install IaC dependencies
+        working-directory: iac
+        run: npm ci
 
-          # 寫入暫存檔並重新註冊
-          echo "${NEW_DEF}" > /tmp/task-def.json
-          NEW_ARN=$(aws ecs register-task-definition \
-            --cli-input-json file:///tmp/task-def.json \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
+      - name: Deploy stacks through guarded entrypoint
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          IMAGE_TAG: ${{ env.VERSION_TAG }}
+          ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
+          DAILY_SUCCESS_EMAIL: ${{ vars.DAILY_SUCCESS_EMAIL }}
+        run: |
+          node scripts/cdk-deploy.js \
+            LineReportMonitoringStack \
+            LineReportEcsStack \
+            LineReportSchedulerStack
 
-          echo "task_def_arn=${NEW_ARN}" >> "$GITHUB_OUTPUT"
-          echo "新 Task Definition ARN: ${NEW_ARN}"
-
-      # ── Step 9（選用）：CDK deploy 同步 state ─────────────────────
-      # 若需要 CDK 同步，取消以下 step 的 '#' 前綴
-      # - name: CDK deploy EcsStack
-      #   working-directory: iac
-      #   run: |
-      #     npm ci
-      #     npx cdk deploy LineReportEcsStack \
-      #       --context imageTag="${VERSION_TAG}" \
-      #       --require-approval never
-
-  # ── 部署摘要 ──────────────────────────────────────────────────────
   summary:
     name: Deployment Summary
     runs-on: ubuntu-latest
-    needs: build-and-push
+    needs: build-and-deploy
     if: always()
     steps:
       - name: Print deployment summary
@@ -139,8 +123,8 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| 項目 | 值 |" >> "$GITHUB_STEP_SUMMARY"
           echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version Tag | \`${{ needs.build-and-push.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SHA Tag | \`${{ needs.build-and-push.outputs.sha_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Task Def ARN | \`${{ needs.build-and-push.outputs.new_task_def_arn }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version Tag | \`${{ needs.build-and-deploy.outputs.version_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA Tag | \`${{ needs.build-and-deploy.outputs.sha_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Deployment Path | \`node scripts/cdk-deploy.js\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Triggered by | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"

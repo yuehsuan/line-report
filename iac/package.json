@@ -7,8 +7,8 @@
     "build": "tsc",
     "watch": "tsc -w",
     "cdk": "cdk",
-    "deploy": "cdk deploy --all --require-approval never",
-    "deploy:stack": "cdk deploy",
+    "deploy": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing imageTag/alarmEmail context.'); process.exit(1)\"",
+    "deploy:stack": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing imageTag/alarmEmail context.'); process.exit(1)\"",
     "diff": "cdk diff --all",
     "synth": "cdk synth --all",
     "test": "tsc && node --test dist/unit-tests/cron-builder.test.js"
