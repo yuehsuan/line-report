@@ -17,6 +17,9 @@ permissions:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '307067291720' }}
+  AWS_ROLE_ARN: ${{ format('arn:aws:iam::{0}:role/{1}', vars.AWS_ACCOUNT_ID || '307067291720', 'github-actions-line-report-deploy') }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'line-report' }}
 
 jobs:
   build-and-deploy:
@@ -52,7 +55,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-LineReport
 
@@ -63,7 +66,7 @@ jobs:
       - name: Build Docker image
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
         run: |
           IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
           echo "IMAGE_BASE=${IMAGE_BASE}" >> "$GITHUB_ENV"
