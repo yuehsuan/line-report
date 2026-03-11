@@ -11,6 +11,7 @@ import { Construct } from 'constructs';
 export interface EcsStackProps extends cdk.StackProps {
   ecrRepo: ecr.Repository;
   imageTag: string;
+  cpuArchitecture: ecs.CpuArchitecture;
   snapshotsTable: dynamodb.Table;
   runsTable: dynamodb.Table;
   logGroup: logs.LogGroup;
@@ -26,7 +27,7 @@ export class EcsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: EcsStackProps) {
     super(scope, id, props);
 
-    const { ecrRepo, imageTag, snapshotsTable, runsTable, logGroup } = props;
+    const { ecrRepo, imageTag, cpuArchitecture, snapshotsTable, runsTable, logGroup } = props;
 
     // ── VPC：使用預設 VPC（可改為自訂 VPC）────────────────────────
     const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
@@ -160,6 +161,10 @@ export class EcsStack extends cdk.Stack {
       memoryLimitMiB: 512,
       executionRole,
       taskRole,
+      runtimePlatform: {
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        cpuArchitecture,
+      },
     });
 
     this.snapshotTaskDefinition.addContainer('app', {
@@ -182,6 +187,10 @@ export class EcsStack extends cdk.Stack {
       memoryLimitMiB: 512,
       executionRole,
       taskRole,
+      runtimePlatform: {
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        cpuArchitecture,
+      },
     });
 
     this.reportTaskDefinition.addContainer('app', {
