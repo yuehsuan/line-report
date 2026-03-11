@@ -29,8 +29,10 @@ LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署
 | **DynamoDB** | 儲存每日用量快照（`usage_snapshots`）與執行紀錄（`job_runs`） |
 | **SSM Parameter Store** | 加密儲存 LINE Token、推播目標、計費設定等機密 |
 | **EventBridge Scheduler** | 排程觸發每日快照（23:55 台北時間）與每月回報 |
+| **EventBridge Rule** | 觸發 heartbeat checker（每日 08:00 / 08:05 與每 6 小時） |
 | **CloudWatch Logs** | 收集容器輸出的 JSON 結構化 Log |
-| **CloudWatch Alarm + SNS** | 偵測到 ERROR Log 時，寄 Email 告警 |
+| **Lambda** | 分流 outcome log、執行 heartbeat 檢查 |
+| **CloudWatch Alarm + SNS** | Failure / Heartbeat 告警寄送 Email |
 
 ### 整體架構（簡覽）
 
@@ -50,10 +52,36 @@ EventBridge Scheduler
 
 SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
 CloudWatch Logs      ←──  ECS 容器輸出 JSON log
+CloudWatch Logs Subscription Filter ──→ Lambda(outcome router) ──→ SNS(debug/failure)
+EventBridge Rule ──→ Lambda(heartbeat checker) ──→ CloudWatch Metric ──→ Alarm ──→ SNS(heartbeat)
 CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 ```
 
 **用一句話理解：** 排程器每天自動紀錄 LINE 訊息用量；每個月從紀錄中計算費用，並自動推播報告到指定的 LINE 群組。
+
+### IaC 架構與頻率
+
+`iac/` 目前由 6 個 stack 組成：
+
+| Stack | 職責 |
+|---|---|
+| `LineReportDatabaseStack` | 建立 `usage_snapshots` 與 `job_runs` |
+| `LineReportEcrStack` | 建立 ECR repository |
+| `LineReportSsmStack` | 建立/匯出 SSM 參數路徑 |
+| `LineReportMonitoringStack` | 建立 log group、SNS topics、CloudWatch alarms、outcome router、heartbeat checker |
+| `LineReportEcsStack` | 建立 ECS cluster、task definition、execution/task roles |
+| `LineReportSchedulerStack` | 建立每日 snapshot 與每月 report 的 EventBridge Scheduler、DLQ 與對應 alarm |
+
+監控與通知頻率如下：
+
+| 項目 | AWS 服務 | 頻率 / 觸發方式 | 用途 |
+|---|---|---|---|
+| `snapshot` 正式執行 | EventBridge Scheduler | 每日 `23:55` Asia/Taipei | 寫入用量快照 |
+| `report` 正式執行 | EventBridge Scheduler | 預設每月 `11` 日 `09:00` Asia/Taipei | 推送月報 |
+| `snapshot heartbeat` | EventBridge Rule + Lambda | 每日 `08:00` Asia/Taipei | 檢查前一日快照是否成功 |
+| `report heartbeat` | EventBridge Rule + Lambda | 每日 `08:05` Asia/Taipei | 檢查本月若已到回報時間，對應月份月報是否成功 |
+| `schedule enabled` 檢查 | EventBridge Rule + Lambda | 每 `6` 小時 | 檢查兩個 Scheduler 是否仍為 `ENABLED` |
+| `debug outcome` 通知 | CloudWatch Logs Subscription + Lambda | 每次 `success/skipped/failed` log | 測試期追蹤執行結果 |
 
 ---
 
@@ -62,7 +90,7 @@ CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 - **每日快照**（23:55 Asia/Taipei）：呼叫 LINE Messaging API 取得當月用量，存入 DynamoDB
 - **跨月封存**：月份變更時自動標記上月最後一筆快照為 `prevMonthFinal`，並支援補封存
 - **每月回報**（每月 11 日 09:00 Asia/Taipei）：計算加購費用，推播繁中訊息到指定 LINE 群組
-- **幂等性**：同一天重複觸發不會重複寫入（conditional put + job_runs 防重）
+- **幂等性**：daily snapshot 同一天重複觸發不會重複寫入；monthly report 同月份成功送出後不會重送，失敗重跑時只會補送未成功 target
 
 ---
 
@@ -134,7 +162,8 @@ cp .env.example .env
 | `AWS_PROFILE` | AWS SSO profile 名稱（使用 IAM key 可留空） | — | |
 | `AWS_ENDPOINT_URL` | 本機測試用 DynamoDB Local endpoint | — | |
 | `IMAGE_TAG` | Docker image tag（部署時必填，禁止使用 latest） | — | 部署時必填 |
-| `ALARM_EMAIL` | 告警 Email（CloudWatch Alarm → SNS） | — | 正式部署必填 |
+| `ALARM_EMAIL` | Failure/Heartbeat 告警 Email | — | 建議正式部署設定 |
+| `DEBUG_EMAIL` | Debug/Outcome 通知 Email | — | 測試期建議設定 |
 
 ### TIERS_JSON 格式範例
 
@@ -194,10 +223,10 @@ DRY_RUN=true npm run report
 ## 部署防呆規則
 
 - 正式環境**只能**從 repo root 執行 `npm run deploy -- [StackName...]`
-- **禁止**直接進入 `iac/` 執行 `cdk deploy`；缺少 `imageTag` / `alarmEmail` context 會導致 task definition 或 alarm subscription 被錯誤收斂
+- **禁止**直接進入 `iac/` 執行 `cdk deploy`；缺少部署 context 會導致 task definition 或通知設定被錯誤收斂
 - `IMAGE_TAG` 為正式部署必填，且該 tag 必須已存在於 ECR
-- `ALARM_EMAIL` 為正式部署必填，省略會直接中止部署
-- 部署腳本會自動驗證：AWS 身分、ECR tag 存在、task definition image、Scheduler 狀態、SNS alarm subscription
+- 若要收到 Failure/Heartbeat/Debug 信件，請在 `.env` 或 CI/CD variables 設定 `ALARM_EMAIL` / `DEBUG_EMAIL`
+- 部署腳本會自動驗證：AWS 身分、ECR tag 存在、task definition image、Scheduler 狀態
 
 ---
 
@@ -261,15 +290,17 @@ cdk bootstrap aws://<帳號ID>/<區域>
 
 ### Step 2：部署基礎設施
 
-在 `.env` 填入 `IMAGE_TAG`、排程設定與告警 Email，再執行：
+在 `.env` 填入 `IMAGE_TAG`、排程設定與通知 Email，再執行：
 
 ```bash
 # 一鍵部署全部 stack（從 .env 讀取所有設定）
 npm run deploy
 
 # 只部署特定 stack
-npm run deploy -- --stacks LineReportSchedulerStack
+npm run deploy -- LineReportSchedulerStack
 ```
+
+> 舊文件若寫 `npm run deploy -- --stacks LineReportSchedulerStack`，部署腳本目前仍相容，但正式文件以裸 stack 名稱為準。
 
 **`.env` 排程相關欄位（deploy 時生效）：**
 
@@ -283,7 +314,8 @@ npm run deploy -- --stacks LineReportSchedulerStack
 | `REPORT_HOUR` | 每月回報時（台北時間）| `9` |
 | `SNAPSHOT_HOUR` | 每日快照時（台北時間）| `23` |
 | `SNAPSHOT_MINUTE` | 每日快照分 | `55` |
-| `ALARM_EMAIL` | 告警 Email（見下方說明）| — |
+| `ALARM_EMAIL` | Failure/Heartbeat 告警 Email（見下方說明）| — |
+| `DEBUG_EMAIL` | Debug/Outcome 通知 Email（測試期用）| — |
 
 **回報排程設定範例：**
 
@@ -322,19 +354,22 @@ aws ssm put-parameter \
 
 ### Step 4：首次推送 Docker Image
 
+> **平台注意：** 目前正式環境的 ECS Fargate task 跑在 `x86_64`。若你使用 Apple Silicon（M1/M2/M3）本機手動 build image，請明確指定 `linux/amd64`，否則推上去後可能在 ECS 出現 `exec format error`。
+
 ```bash
 # 登入 ECR
 aws ecr get-login-password --region ap-northeast-1 | \
   docker login --username AWS --password-stdin <帳號>.dkr.ecr.ap-northeast-1.amazonaws.com
 
-# Build 並推送
+# Build 並推送（手動 build 建議固定使用 buildx + linux/amd64）
 ECR_URI="<帳號>.dkr.ecr.ap-northeast-1.amazonaws.com/line-report"
 VERSION_TAG="v20260225-1"
 SHA_TAG="sha-$(git rev-parse --short HEAD)"
 
-docker build -t "${ECR_URI}:${VERSION_TAG}" -t "${ECR_URI}:${SHA_TAG}" .
-docker push "${ECR_URI}:${VERSION_TAG}"
-docker push "${ECR_URI}:${SHA_TAG}"
+docker buildx build --platform linux/amd64 \
+  -t "${ECR_URI}:${VERSION_TAG}" \
+  -t "${ECR_URI}:${SHA_TAG}" \
+  --push .
 ```
 
 ### Step 5：手動觸發測試
@@ -365,13 +400,14 @@ aws ecs run-task \
 
 | 名稱 | 類型 | 說明 |
 |---|---|---|
-| `AWS_ROLE_ARN` | Secret | OIDC Role ARN（格式：`arn:aws:iam::帳號:role/xxx`）|
-| `ECR_REPOSITORY` | Secret | ECR 儲存庫名稱（如 `line-report`，不含 registry）|
-| `AWS_REGION` | Variable | AWS 區域（如 `ap-northeast-1`）|
-| `ALARM_EMAIL` | Variable | 正式環境告警收件人 Email（CI/CD 必填）|
-| `DAILY_SUCCESS_EMAIL` | Variable | 每日 snapshot 成功通知 Email（選填，臨時功能可留空）|
+| `AWS_ACCOUNT_ID` | Variable | AWS 帳號 ID（預設 `307067291720`，跨帳號時覆蓋）|
+| `AWS_REGION` | Variable | AWS 區域（預設 `ap-northeast-1`）|
+| `ECR_REPOSITORY` | Variable | ECR 儲存庫名稱（預設 `line-report`）|
+| `ALARM_EMAIL` | Variable | Failure/Heartbeat 告警收件人 Email |
+| `DEBUG_EMAIL` | Variable | Debug/Outcome 通知收件人 Email（測試期）|
+| `ENABLE_DEBUG_OUTCOME_NOTICES` | Variable | 是否建立 debug outcome 通知（預設 `true`）|
 
-> CI/CD 會直接呼叫 repo root 的 `scripts/cdk-deploy.js`。若缺少 `ALARM_EMAIL`，workflow 會直接失敗，避免把 SNS 告警訂閱刪掉。
+> CI/CD 會直接呼叫 repo root 的 `scripts/cdk-deploy.js`。`AWS_REGION` 與 `ECR_REPOSITORY` 未設定時會使用預設值；若不需要 debug 信，可將 `ENABLE_DEBUG_OUTCOME_NOTICES=false`。
 
 ### OIDC Role 設定
 
@@ -393,12 +429,22 @@ aws ecs run-task \
 
 ### 觸發部署
 
-推送任意 `v*` tag 即觸發 CI/CD：
+推送任意 `v*` git tag 即觸發 CI/CD：
 
 ```bash
 git tag v20260225-1
 git push origin v20260225-1
 ```
+
+CI image tag 規則：
+
+| 觸發方式 | ECR image tag |
+|---|---|
+| `push` Git tag（如 `v2.5.1`） | 與 git tag 相同，例如 `v2.5.1` |
+| 任意部署 | 另附一個 `sha-<commit前7碼>` |
+| `workflow_dispatch` | `ci-YYYYMMDD-<run_number>` |
+
+> 建議把正式版 release 與 ECR image tag 對齊，用 git tag 作為唯一正式版本來源；`sha-*` 用於追 commit，`ci-*` 僅作手動流程或暫時驗證用途。
 
 ---
 
@@ -413,114 +459,145 @@ aws ecr describe-images \
   --output table
 ```
 
-### Step 2：建立回滾版本的 Task Definition
+### Step 2：從 repo root 重新部署舊版 image 到 ECS task definitions
 
 ```bash
 TARGET_TAG="v20260224-1"   # 替換為目標版本
-ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
-FAMILY="line-report"
-
-aws ecs describe-task-definition --task-definition $FAMILY \
-  --query 'taskDefinition' \
-  | jq --arg img "$ECR_URI:$TARGET_TAG" \
-       'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
-        .containerDefinitions[0].image = $img' \
-  > /tmp/td-rollback.json
-
-NEW_ARN=$(aws ecs register-task-definition \
-  --cli-input-json file:///tmp/td-rollback.json \
-  --query 'taskDefinition.taskDefinitionArn' --output text)
-
-echo "已建立回滾 Task Definition: $NEW_ARN"
+# 建議先把 .env 的 IMAGE_TAG 改成目標版本，再重新部署 ECS stack
+IMAGE_TAG="$TARGET_TAG" npm run deploy -- LineReportEcsStack
 ```
 
-### Step 3：更新 EventBridge Scheduler 指向回滾版本
+> 不要直接進入 `iac/` 跑 `cdk deploy`。`iac/bin/app.ts` 明確要求 `imageTag` context，事故時請一律從 repo root 執行 `npm run deploy`。
+>
+> 若是手動 build 後要回滾或重 deploy，請確認 image 平台仍為 `linux/amd64`；目前正式環境尚未切到 ARM64。
+
+### Step 3：確認兩個 task definition family 都已切回舊版 image
 
 ```bash
-# 確認目前 Scheduler 指向的版本
-aws scheduler get-schedule --name line-report-daily-snapshot \
-  --query 'Target.EcsParameters.TaskDefinitionArn'
+TARGET_TAG="v20260224-1"
+ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
 
-# 更新 Scheduler（daily-snapshot 與 monthly-report 皆需更新）
-# 注意：--target 參數需填入完整 JSON，請先取得當前設定再更新
-aws scheduler get-schedule --name line-report-daily-snapshot > /tmp/current-schedule.json
+aws ecs describe-task-definition --task-definition line-report-snapshot \
+  --query 'taskDefinition.containerDefinitions[0].image' --output text
 
-# 參考 /tmp/current-schedule.json 修改 TaskDefinitionArn 後執行 update-schedule
+aws ecs describe-task-definition --task-definition line-report-report \
+  --query 'taskDefinition.containerDefinitions[0].image' --output text
 ```
 
-> **提示**：若使用 CDK 管理，可直接重新部署指定舊版本：
-> ```bash
-> cd iac && cdk deploy LineReportEcsStack --context imageTag=$TARGET_TAG
-> ```
+預期兩者都應回傳 `${ECR_URI}:${TARGET_TAG}`。
+
+### Step 4：確認兩個 Scheduler 仍指向正確 family
+
+```bash
+aws scheduler get-schedule --name line-report-daily-snapshot \
+  --query 'Target.EcsParameters.TaskDefinitionArn' --output text
+
+aws scheduler get-schedule --name line-report-monthly-report \
+  --query 'Target.EcsParameters.TaskDefinitionArn' --output text
+```
+
+若 Scheduler 被誤改，再從 repo root 重新套用：
+
+```bash
+npm run deploy -- LineReportSchedulerStack
+```
 
 ---
 
-## 告警設定
+## 告警與通知設定
 
-服務在 CDK 部署後自動建立 CloudWatch Alarm，偵測到 `level=error` 的 log 即觸發。  
-告警路徑：**CloudWatch Alarm → SNS Topic `line-report-alarms` → Email**
+目前通知分成 3 類，對應不同 AWS 服務與用途：
 
-### 方式一：部署時直接訂閱（推薦）
+| 類型 | SNS Topic | AWS 服務 | 用途 |
+|---|---|---|---|
+| Failure Alert | `line-report-alarms` | CloudWatch Alarm + SNS；CloudWatch Logs Subscription + Lambda + SNS | 真正失敗、錯誤與 DLQ 告警 |
+| Missing/Heartbeat Alert | `line-report-heartbeat-alerts` | EventBridge Rule + Lambda + CloudWatch Metric/Alarm + SNS | 任務未在預期時間成功、Scheduler 被停用 |
+| Debug/Outcome Notice | `line-report-debug-outcomes` | CloudWatch Logs Subscription + Lambda + SNS | 測試期追蹤 success / skipped / failed |
 
-在 `.env` 填入 `ALARM_EMAIL`，再執行 `npm run deploy`，CDK 自動將 Email 加入 SNS 訂閱：
+### Failure Alert
+
+路徑：
+- `CloudWatch Alarm -> SNS Topic line-report-alarms -> Email`
+- `CloudWatch Logs -> Subscription Filter -> outcome router Lambda -> SNS Topic line-report-alarms -> Email`
+
+涵蓋事件：
+- `line-report-error-alarm`
+- `line-report-heartbeat-checker-error`
+- `line-report-scheduler-dlq-alarm`
+- `snapshot_failed`
+- `report_failed`
+- 其他 `level=error` 的應用程式 log
+
+### Missing/Heartbeat Alert
+
+路徑：
+- `EventBridge Rule -> heartbeat checker Lambda -> CloudWatch custom metric -> CloudWatch Alarm -> SNS Topic line-report-heartbeat-alerts -> Email`
+
+涵蓋事件與頻率：
+
+| 檢查項目 | 頻率 | 內容 |
+|---|---|---|
+| `snapshot heartbeat` | 每日 `08:00` Asia/Taipei | 檢查前一日 snapshot 是否成功 |
+| `report heartbeat` | 每日 `08:05` Asia/Taipei | 檢查本月若已到回報時間，對應月份 report 是否成功 |
+| `schedule enabled` | 每 `6` 小時 | 檢查 `line-report-daily-snapshot` / `line-report-monthly-report` 是否仍為 `ENABLED` |
+
+對應 alarm：
+- `line-report-snapshot-missing`
+- `line-report-report-missing`
+- `line-report-daily-snapshot-schedule-disabled`
+- `line-report-monthly-report-schedule-disabled`
+
+### Debug/Outcome Notice
+
+路徑：
+- `CloudWatch Logs -> Subscription Filter -> outcome router Lambda -> SNS Topic line-report-debug-outcomes -> Email`
+
+涵蓋事件：
+- `snapshot_success`
+- `snapshot_skipped`
+- `snapshot_failed`
+- `report_success`
+- `report_skipped`
+- `report_failed`
+
+> `Debug/Outcome Notice` 是測試期用機制，穩定後可透過 `ENABLE_DEBUG_OUTCOME_NOTICES=false` 停用並在後續版本移除。
+
+### 部署時設定 Email 訂閱
 
 ```bash
 # .env
 ALARM_EMAIL=you@example.com
+DEBUG_EMAIL=debug@example.com
 
 npm run deploy
 ```
 
-部署後 AWS 會寄確認信到該 Email，**必須點擊 "Confirm subscription" 連結才會收到告警**。
-
-> 若使用已確認過的同一個 Email 重新部署，subscription 會沿用既有確認狀態。
-
----
-
-### 方式二：部署後手動訂閱（已部署可補設定）
-
-```bash
-# 取得 SNS Topic ARN
-TOPIC_ARN=$(aws cloudformation describe-stacks \
-  --stack-name LineReportMonitoringStack \
-  --query "Stacks[0].Outputs[?OutputKey=='AlarmTopicArn'].OutputValue" \
-  --output text)
-
-# 新增 Email 訂閱
-aws sns subscribe \
-  --topic-arn "$TOPIC_ARN" \
-  --protocol email \
-  --notification-endpoint "you@example.com"
-```
-
-執行後同樣需要點擊確認信。
-
----
+部署後 AWS 會寄確認信到對應 Email，**必須點擊 "Confirm subscription" 連結才會收到信件**。  
+若使用同一個已確認過的 Email 重新部署，subscription 會沿用既有確認狀態。
 
 ### 查看現有訂閱
 
 ```bash
-aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN"
+aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:ap-northeast-1:<帳號>:line-report-alarms
+aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:ap-northeast-1:<帳號>:line-report-heartbeat-alerts
+aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:ap-northeast-1:<帳號>:line-report-debug-outcomes
 ```
 
-### 取消訂閱
+### 常見觸發原因
 
-```bash
-aws sns unsubscribe --subscription-arn "<SubscriptionArn>（從上方指令取得）"
-```
+- prevMonthFinal 快照不存在
+- LINE API timeout / 429 / 5xx
+- DynamoDB 連線逾時
+- task definition image 不存在
+- Scheduler `RunTask` 失敗
+- monthly report 對應月份尚未成功
+- Scheduler 被停用或排程被改壞
 
----
-
-### 告警觸發條件
-
-| 告警名稱 | 條件 | Log Group |
-|---------|------|-----------|
-| `line-report-error-alarm` | 5 分鐘內 `level=error` ≥ 1 次 | `/ecs/line-report` |
-| `line-report-snapshot-missing` | 26 小時內沒有 snapshot 成功或 idempotent 成功訊號 | `/ecs/line-report` |
-| `line-report-scheduler-dlq-alarm` | Scheduler DLQ 出現訊息 | N/A |
-
-> **常見觸發原因：** prevMonthFinal 快照不存在、LINE API 失敗、DynamoDB 連線逾時、task definition image 不存在、Scheduler RunTask 失敗。  
-> 詳情請至 CloudWatch Alarm history、CloudWatch Logs `/ecs/line-report` 與 Scheduler DLQ 一起查。
+詳情請一起檢查：
+- CloudWatch Alarm history
+- CloudWatch Logs `/ecs/line-report`
+- `job_runs`
+- Scheduler DLQ
 
 ---
 
@@ -589,33 +666,11 @@ aws dynamodb get-item \
 
 ---
 
-## 架構說明
-
-```
-EventBridge Scheduler
-  │
-  ├─ 每日 23:55 (台北時間)
-  │       └──→ ECS Fargate：snapshot task
-  │                 ├── 呼叫 LINE API 取得當月訊息用量
-  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
-  │
-  └─ 每月 (預設 11 日 09:00)
-          └──→ ECS Fargate：report task
-                    ├── 從 DynamoDB 讀取上月最終快照
-                    ├── 計算加購費用
-                    └── 推播報告到 LINE 群組
-
-SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
-CloudWatch Logs      ←──  ECS 容器輸出 JSON log
-CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
-```
-
----
-
 ## 注意事項
 
 - LINE consumption API 回傳的 `totalUsage` 為**近似值**，最終帳單請以 LINE OA Manager 後台為準
 - `isPrevMonthFinal` 快照一旦標記，建議不要手動修改（影響回報計算）
 - `cdk destroy` 不會刪除 DynamoDB 資料表（`RemovalPolicy.RETAIN`），請手動清理
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
-- 正式環境若需重新部署，請確認 `.env` 內 `IMAGE_TAG` 與 `ALARM_EMAIL` 都存在，再從 repo root 執行 `npm run deploy`
+- 正式環境若需重新部署，請至少確認 `.env` 內 `IMAGE_TAG` 已設定；若要收到通知，再補 `ALARM_EMAIL` / `DEBUG_EMAIL`
+- `scripts/sync-ssm.sh` 會沿用 `AWS_PROFILE`；若未設定，則使用 AWS CLI 預設 credentials chain

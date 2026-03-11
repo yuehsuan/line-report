@@ -14,7 +14,11 @@
 set -euo pipefail
 
 ENV_FILE=".env"
-PROFILE="srec"
+PROFILE="${AWS_PROFILE:-}"
+PROFILE_ARGS=()
+if [[ -n "$PROFILE" ]]; then
+  PROFILE_ARGS=(--profile "$PROFILE")
+fi
 
 BOLD="\033[1m"
 GREEN="\033[32m"
@@ -36,13 +40,18 @@ put_ssm() {
     skip "${name}（.env 無此值，跳過）"
     return
   fi
-  aws ssm put-parameter \
-    --profile "$PROFILE" \
-    --name "$path" \
-    --type "$type" \
-    --value "$val" \
-    --overwrite \
-    --no-cli-pager > /dev/null
+  local aws_cmd=(aws ssm put-parameter)
+  if [[ ${#PROFILE_ARGS[@]} -gt 0 ]]; then
+    aws_cmd+=("${PROFILE_ARGS[@]}")
+  fi
+  aws_cmd+=(
+    --name "$path"
+    --type "$type"
+    --value "$val"
+    --overwrite
+    --no-cli-pager
+  )
+  "${aws_cmd[@]}" > /dev/null
   # 顯示時遮蔽 token（只印前 6 字）
   local display="$val"
   if [[ "$name" == "LINE_CHANNEL_ACCESS_TOKEN" ]]; then
@@ -53,7 +62,8 @@ put_ssm() {
 
 FILTER="${1:-all}"
 
-echo -e "${BOLD}同步 .env → SSM Parameter Store（profile: ${PROFILE}）${RESET}"
+PROFILE_DISPLAY="${PROFILE:-<default credentials>}"
+echo -e "${BOLD}同步 .env → SSM Parameter Store（profile: ${PROFILE_DISPLAY}）${RESET}"
 echo ""
 
 if [[ "$FILTER" == "all" || "$FILTER" == "token" ]]; then
