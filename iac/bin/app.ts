@@ -24,6 +24,12 @@ if (imageTag === 'latest') {
   throw new Error('[CDK] imageTag 不得使用 "latest"，請指定明確版本 tag（如 v20260225-1 或 sha-xxxxxxx）');
 }
 
+const cpuArchitectureContext = app.node.tryGetContext('cpuArchitecture') || 'arm64';
+if (cpuArchitectureContext !== 'arm64') {
+  throw new Error(`[CDK] 目前只允許 ARM64 部署，cpuArchitecture=${cpuArchitectureContext} 不被接受。`);
+}
+const cpuArchitecture = cdk.aws_ecs.CpuArchitecture.ARM64;
+
 const dbStack = new DatabaseStack(app, 'LineReportDatabaseStack', { env });
 
 const ecrStack = new EcrStack(app, 'LineReportEcrStack', { env });
@@ -36,6 +42,7 @@ const ecsStack = new EcsStack(app, 'LineReportEcsStack', {
   env,
   ecrRepo: ecrStack.repository,
   imageTag,
+  cpuArchitecture,
   snapshotsTable: dbStack.snapshotsTable,
   runsTable: dbStack.runsTable,
   logGroup: monitoringStack.logGroup,

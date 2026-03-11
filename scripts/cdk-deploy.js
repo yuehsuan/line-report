@@ -10,6 +10,7 @@
  *
  * 支援的 .env 欄位：
  *   IMAGE_TAG        Docker image tag（必填）
+ *   CPU_ARCHITECTURE ECS / Docker 平台架構（固定 arm64，預設 arm64）
  *   REPORT_MODE      date（預設）或 weekday
  *   REPORT_DAY       每月回報日（REPORT_MODE=date 時使用，預設 11）
  *   REPORT_WEEK      第幾週（REPORT_MODE=weekday 時使用，預設 2）
@@ -34,6 +35,12 @@ if (!imageTag) {
 }
 if (imageTag === 'latest') {
   console.error('[cdk-deploy] 錯誤：IMAGE_TAG 不得使用 "latest"，請指定明確版本 tag');
+  process.exit(1);
+}
+
+const cpuArchitecture = process.env.CPU_ARCHITECTURE || 'arm64';
+if (cpuArchitecture !== 'arm64') {
+  console.error(`[cdk-deploy] 錯誤：目前只允許 ARM64 部署，CPU_ARCHITECTURE 必須為 "arm64"，目前值：${cpuArchitecture}`);
   process.exit(1);
 }
 
@@ -62,6 +69,7 @@ if (isNaN(reportDay) || reportDay < 1 || reportDay > 28) {
 
 const contextArgs = [
   `imageTag=${imageTag}`,
+  `cpuArchitecture=${cpuArchitecture}`,
   `reportMode=${reportMode}`,
   `reportDay=${process.env.REPORT_DAY      || '11'}`,
   `reportWeek=${process.env.REPORT_WEEK    || '2'}`,
@@ -129,17 +137,24 @@ function ensureImageTagExists() {
   console.log(`[cdk-deploy] ECR 已確認存在 image tag：${imageTag}`);
 }
 
-function verifyTaskDefinitionImage(family, expectedImage) {
+function verifyTaskDefinitionImage(family, expectedImage, expectedCpuArchitecture) {
   const data = runAwsJson(
     ['ecs', 'describe-task-definition', '--task-definition', family, '--query', 'taskDefinition'],
     `[cdk-deploy] 無法查詢 ECS task definition：${family}`
   );
   const actualImage = data.containerDefinitions?.[0]?.image;
+  const actualCpuArchitecture = data.runtimePlatform?.cpuArchitecture;
   if (actualImage !== expectedImage) {
     console.error(`[cdk-deploy] 部署後驗證失敗：${family} image=${actualImage}，預期=${expectedImage}`);
     process.exit(1);
   }
-  console.log(`[cdk-deploy] 驗證通過：${family} 使用 ${actualImage}`);
+  if (actualCpuArchitecture !== expectedCpuArchitecture.toUpperCase()) {
+    console.error(
+      `[cdk-deploy] 部署後驗證失敗：${family} cpuArchitecture=${actualCpuArchitecture}，預期=${expectedCpuArchitecture.toUpperCase()}`
+    );
+    process.exit(1);
+  }
+  console.log(`[cdk-deploy] 驗證通過：${family} 使用 ${actualImage}，架構 ${actualCpuArchitecture}`);
 }
 
 function verifyScheduleState(name, expectedTaskFamily) {
@@ -202,8 +217,8 @@ if (result.status !== 0) {
 const expectedImage = `${identity.Account}.dkr.ecr.${process.env.AWS_REGION || 'ap-northeast-1'}.amazonaws.com/line-report:${imageTag}`;
 
 if (shouldVerifyStack('LineReportEcsStack')) {
-  verifyTaskDefinitionImage('line-report-snapshot', expectedImage);
-  verifyTaskDefinitionImage('line-report-report', expectedImage);
+  verifyTaskDefinitionImage('line-report-snapshot', expectedImage, cpuArchitecture);
+  verifyTaskDefinitionImage('line-report-report', expectedImage, cpuArchitecture);
 }
 
 if (shouldVerifyStack('LineReportSchedulerStack') || shouldVerifyStack('LineReportEcsStack')) {

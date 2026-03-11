@@ -20,6 +20,8 @@ env:
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID || '307067291720' }}
   AWS_ROLE_ARN: ${{ format('arn:aws:iam::{0}:role/{1}', vars.AWS_ACCOUNT_ID || '307067291720', 'github-actions-line-report-deploy') }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'line-report' }}
+  CPU_ARCHITECTURE: arm64
+  IMAGE_PLATFORM: linux/arm64
 
 jobs:
   build-and-deploy:
@@ -74,15 +76,16 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_PLATFORM: ${{ env.IMAGE_PLATFORM }}
         run: |
           IMAGE_BASE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
           echo "IMAGE_BASE=${IMAGE_BASE}" >> "$GITHUB_ENV"
-          docker buildx build --platform linux/amd64 \
+          docker buildx build --platform "${IMAGE_PLATFORM}" \
             -t "${IMAGE_BASE}:${VERSION_TAG}" \
             -t "${IMAGE_BASE}:${SHA_TAG}" \
             --push \
             .
-          echo "Build 完成：${IMAGE_BASE}:${VERSION_TAG} 及 ${IMAGE_BASE}:${SHA_TAG}"
+          echo "Build 完成：${IMAGE_BASE}:${VERSION_TAG} 及 ${IMAGE_BASE}:${SHA_TAG} (${IMAGE_PLATFORM})"
 
       - name: Install root dependencies
         run: npm ci
@@ -95,6 +98,7 @@ jobs:
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
           IMAGE_TAG: ${{ env.VERSION_TAG }}
+          CPU_ARCHITECTURE: ${{ env.CPU_ARCHITECTURE }}
           ALARM_EMAIL: ${{ vars.ALARM_EMAIL }}
           DEBUG_EMAIL: ${{ vars.DEBUG_EMAIL }}
           ENABLE_DEBUG_OUTCOME_NOTICES: ${{ vars.ENABLE_DEBUG_OUTCOME_NOTICES || 'true' }}

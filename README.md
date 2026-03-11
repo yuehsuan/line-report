@@ -225,8 +225,9 @@ DRY_RUN=true npm run report
 - 正式環境**只能**從 repo root 執行 `npm run deploy -- [StackName...]`
 - **禁止**直接進入 `iac/` 執行 `cdk deploy`；缺少部署 context 會導致 task definition 或通知設定被錯誤收斂
 - `IMAGE_TAG` 為正式部署必填，且該 tag 必須已存在於 ECR
+- 本機與 AWS 正式環境一律使用 `linux/arm64`；`CPU_ARCHITECTURE` 若有設定也只能是 `arm64`
 - 若要收到 Failure/Heartbeat/Debug 信件，請在 `.env` 或 CI/CD variables 設定 `ALARM_EMAIL` / `DEBUG_EMAIL`
-- 部署腳本會自動驗證：AWS 身分、ECR tag 存在、task definition image、Scheduler 狀態
+- 部署腳本會自動驗證：AWS 身分、ECR tag 存在、task definition image、task definition CPU 架構、Scheduler 狀態
 
 ---
 
@@ -307,6 +308,7 @@ npm run deploy -- LineReportSchedulerStack
 | 欄位 | 說明 | 預設值 |
 |------|------|--------|
 | `IMAGE_TAG` | Docker image tag（必填）| — |
+| `CPU_ARCHITECTURE` | Docker / ECS 架構，固定 `arm64` | `arm64` |
 | `REPORT_MODE` | 回報模式：`date` 或 `weekday` | `date` |
 | `REPORT_DAY` | 每月固定日（`REPORT_MODE=date` 時用，1-28）| `11` |
 | `REPORT_WEEK` | 第幾週（`REPORT_MODE=weekday` 時用，**建議 1-4**）| `2` |
@@ -354,19 +356,19 @@ aws ssm put-parameter \
 
 ### Step 4：首次推送 Docker Image
 
-> **平台注意：** 目前正式環境的 ECS Fargate task 跑在 `x86_64`。若你使用 Apple Silicon（M1/M2/M3）本機手動 build image，請明確指定 `linux/amd64`，否則推上去後可能在 ECS 出現 `exec format error`。
+> **平台注意：** 本專案的本機開發、手動 build、CI/CD 與 AWS ECS Fargate 全部統一使用 `linux/arm64`。若 image 平台與 ECS task definition 的 CPU architecture 不一致，部署後可能出現 `exec format error`。
 
 ```bash
 # 登入 ECR
 aws ecr get-login-password --region ap-northeast-1 | \
   docker login --username AWS --password-stdin <帳號>.dkr.ecr.ap-northeast-1.amazonaws.com
 
-# Build 並推送（手動 build 建議固定使用 buildx + linux/amd64）
+# Build 並推送（手動 build 固定使用 buildx + linux/arm64）
 ECR_URI="<帳號>.dkr.ecr.ap-northeast-1.amazonaws.com/line-report"
 VERSION_TAG="v20260225-1"
 SHA_TAG="sha-$(git rev-parse --short HEAD)"
 
-docker buildx build --platform linux/amd64 \
+docker buildx build --platform linux/arm64 \
   -t "${ECR_URI}:${VERSION_TAG}" \
   -t "${ECR_URI}:${SHA_TAG}" \
   --push .
@@ -408,6 +410,7 @@ aws ecs run-task \
 | `ENABLE_DEBUG_OUTCOME_NOTICES` | Variable | 是否建立 debug outcome 通知（預設 `true`）|
 
 > CI/CD 會直接呼叫 repo root 的 `scripts/cdk-deploy.js`。`AWS_REGION` 與 `ECR_REPOSITORY` 未設定時會使用預設值；若不需要 debug 信，可將 `ENABLE_DEBUG_OUTCOME_NOTICES=false`。
+> GitHub Actions 目前固定 build `linux/arm64`，並以 ARM64 task definition 部署到 ECS Fargate。
 
 ### OIDC Role 設定
 
@@ -469,7 +472,7 @@ IMAGE_TAG="$TARGET_TAG" npm run deploy -- LineReportEcsStack
 
 > 不要直接進入 `iac/` 跑 `cdk deploy`。`iac/bin/app.ts` 明確要求 `imageTag` context，事故時請一律從 repo root 執行 `npm run deploy`。
 >
-> 若是手動 build 後要回滾或重 deploy，請確認 image 平台仍為 `linux/amd64`；目前正式環境尚未切到 ARM64。
+> 若是手動 build 後要回滾或重 deploy，請確認 image 平台仍為 `linux/arm64`，且 ECS task definition 仍使用 ARM64；兩邊只要有一邊不一致，就可能在執行時出現 `exec format error`。
 
 ### Step 3：確認兩個 task definition family 都已切回舊版 image
 
@@ -485,6 +488,18 @@ aws ecs describe-task-definition --task-definition line-report-report \
 ```
 
 預期兩者都應回傳 `${ECR_URI}:${TARGET_TAG}`。
+
+另外可用下列指令確認 task definition 仍為 ARM64：
+
+```bash
+aws ecs describe-task-definition --task-definition line-report-snapshot \
+  --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
+
+aws ecs describe-task-definition --task-definition line-report-report \
+  --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
+```
+
+預期兩者都應回傳 `ARM64`。
 
 ### Step 4：確認兩個 Scheduler 仍指向正確 family
 
