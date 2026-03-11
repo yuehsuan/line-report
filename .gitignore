@@ -26,3 +26,6 @@ doc/plan/
 
 # Bug 修復驗證腳本（本地執行，不進 git）
 **/local-bug-check/
+
+# Codex local temp files
+.codex-tmp/

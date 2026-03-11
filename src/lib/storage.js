@@ -109,6 +109,48 @@ export async function getJobRun(jobId) {
 }
 
 /**
+ * 嘗試取得 job run 執行權。
+ * 僅當紀錄不存在，或狀態為允許覆寫的狀態時才會成功。
+ * @param {string} jobId
+ * @param {Object} fields
+ * @param {Object} [options]
+ * @param {string[]} [options.allowOverwriteStatuses=[]]
+ * @returns {Promise<boolean>}
+ */
+export async function claimJobRun(jobId, fields, { allowOverwriteStatuses = [] } = {}) {
+  const ttl = Math.floor(Date.now() / 1000) + JOB_RUN_TTL_SECONDS;
+  const item = { jobId, ...fields, updatedAt: new Date().toISOString(), ttl };
+
+  const conditions = ['attribute_not_exists(jobId)'];
+  const expressionAttributeNames = {};
+  const expressionAttributeValues = {};
+
+  if (allowOverwriteStatuses.length > 0) {
+    expressionAttributeNames['#status'] = 'status';
+    for (const [idx, status] of allowOverwriteStatuses.entries()) {
+      const key = `:allowed${idx}`;
+      conditions.push(`#status = ${key}`);
+      expressionAttributeValues[key] = status;
+    }
+  }
+
+  try {
+    await dbPut(TABLE_RUNS(), item, {
+      ConditionExpression: conditions.join(' OR '),
+      ...(Object.keys(expressionAttributeNames).length > 0 ? { ExpressionAttributeNames: expressionAttributeNames } : {}),
+      ...(Object.keys(expressionAttributeValues).length > 0 ? { ExpressionAttributeValues: expressionAttributeValues } : {}),
+    });
+    return true;
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException || err.name === 'ConditionalCheckFailedException') {
+      log.info({ jobId }, 'job_run 已存在且不可覆寫，略過 claim');
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
  * 建立或更新 job run 紀錄
  * @param {string} jobId
  * @param {Object} fields

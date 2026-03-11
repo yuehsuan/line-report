@@ -13,7 +13,7 @@ import {
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // 動態 import 確保 mock 已設定
-const { writeSnapshot, getPrevMonthFinalSnapshot, markPrevMonthFinal, getJobRun, upsertJobRun } =
+const { writeSnapshot, getPrevMonthFinalSnapshot, markPrevMonthFinal, claimJobRun, getJobRun, upsertJobRun } =
   await import('../lib/storage.js');
 
 beforeEach(() => {
@@ -177,5 +177,43 @@ describe('upsertJobRun', () => {
     const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
     assert.ok(typeof item.ttl === 'number', 'ttl 應為 number');
     assert.ok(item.ttl >= beforeTs && item.ttl <= afterTs, 'ttl 應在 90 天後的合理範圍');
+  });
+});
+
+describe('claimJobRun', () => {
+  test('紀錄不存在時可成功 claim', async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    const claimed = await claimJobRun('report#2026-01', { status: 'running' });
+
+    assert.equal(claimed, true);
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    assert.equal(input.ConditionExpression, 'attribute_not_exists(jobId)');
+  });
+
+  test('只允許 failed 狀態覆寫時，ConditionExpression 應正確組成', async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    const claimed = await claimJobRun('report#2026-01', { status: 'running' }, {
+      allowOverwriteStatuses: ['failed'],
+    });
+
+    assert.equal(claimed, true);
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    assert.equal(input.ConditionExpression, 'attribute_not_exists(jobId) OR #status = :allowed0');
+    assert.deepEqual(input.ExpressionAttributeNames, { '#status': 'status' });
+    assert.deepEqual(input.ExpressionAttributeValues, { ':allowed0': 'failed' });
+  });
+
+  test('ConditionalCheckFailedException 時回傳 false', async () => {
+    const err = new Error('ConditionalCheckFailed');
+    err.name = 'ConditionalCheckFailedException';
+    ddbMock.on(PutCommand).rejects(err);
+
+    const claimed = await claimJobRun('report#2026-01', { status: 'running' }, {
+      allowOverwriteStatuses: ['failed'],
+    });
+
+    assert.equal(claimed, false);
   });
 });
