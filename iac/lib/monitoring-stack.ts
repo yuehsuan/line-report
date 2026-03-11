@@ -1,86 +1,96 @@
 import * as cdk from 'aws-cdk-lib';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as destinations from 'aws-cdk-lib/aws-logs-destinations';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 
 export class MonitoringStack extends cdk.Stack {
   public readonly logGroup: logs.LogGroup;
-  public readonly alarmTopic: sns.Topic;
-  public readonly successTopic?: sns.Topic;
+  public readonly failureAlertTopic: sns.Topic;
+  public readonly heartbeatAlertTopic: sns.Topic;
+  public readonly debugOutcomeTopic: sns.Topic;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // ── CloudWatch Log Group ──────────────────────────────────────
     this.logGroup = new logs.LogGroup(this, 'LineReportLogGroup', {
       logGroupName: '/ecs/line-report',
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // ── SNS Topic for Alarms（告警接口）──────────────────────────
-    this.alarmTopic = new sns.Topic(this, 'AlarmTopic', {
+    // 保留舊 resource path `AlarmTopic`，避免 SchedulerStack 更新前先撞到 export 刪除。
+    this.failureAlertTopic = new sns.Topic(this, 'AlarmTopic', {
       topicName: 'line-report-alarms',
-      displayName: 'LINE 用量回報服務告警',
+      displayName: 'LINE 用量回報服務 Failure Alerts',
     });
 
-    // 告警接收 Email（替換為實際 Email 後 CDK deploy）
-    const alarmEmail = this.node.tryGetContext('alarmEmail') as string | undefined;
-    if (alarmEmail) {
-      this.alarmTopic.addSubscription(new subscriptions.EmailSubscription(alarmEmail));
+    this.heartbeatAlertTopic = new sns.Topic(this, 'HeartbeatAlertTopic', {
+      topicName: 'line-report-heartbeat-alerts',
+      displayName: 'LINE 用量回報服務 Missing And Heartbeat Alerts',
+    });
+
+    this.debugOutcomeTopic = new sns.Topic(this, 'DebugOutcomeTopic', {
+      topicName: 'line-report-debug-outcomes',
+      displayName: 'LINE 用量回報服務 Debug Outcome Notices',
+    });
+
+    const legacyAlarmEmail = this.node.tryGetContext('alarmEmail') as string | undefined;
+    const failureAlertEmail =
+      (this.node.tryGetContext('failureAlertEmail') as string | undefined) || legacyAlarmEmail;
+    const heartbeatAlertEmail =
+      (this.node.tryGetContext('heartbeatAlertEmail') as string | undefined) || legacyAlarmEmail;
+    const debugEmail = this.node.tryGetContext('debugEmail') as string | undefined;
+    const enableDebugOutcomeNotices =
+      String(this.node.tryGetContext('enableDebugOutcomeNotices') ?? 'true') !== 'false';
+    const snapshotHour = String(this.node.tryGetContext('snapshotHour') ?? '23');
+    const snapshotMinute = String(this.node.tryGetContext('snapshotMinute') ?? '55');
+    const reportMode = String(this.node.tryGetContext('reportMode') ?? 'date');
+    const reportDay = String(this.node.tryGetContext('reportDay') ?? '11');
+    const reportWeek = String(this.node.tryGetContext('reportWeek') ?? '2');
+    const reportWeekday = String(this.node.tryGetContext('reportWeekday') ?? '3');
+    const reportHour = String(this.node.tryGetContext('reportHour') ?? '9');
+
+    if (failureAlertEmail) {
+      this.failureAlertTopic.addSubscription(new subscriptions.EmailSubscription(failureAlertEmail));
+    }
+    if (heartbeatAlertEmail) {
+      this.heartbeatAlertTopic.addSubscription(
+        new subscriptions.EmailSubscription(heartbeatAlertEmail)
+      );
+    }
+    if (debugEmail) {
+      this.debugOutcomeTopic.addSubscription(new subscriptions.EmailSubscription(debugEmail));
     }
 
-    const dailySuccessEmail = this.node.tryGetContext('dailySuccessEmail') as string | undefined;
-    if (dailySuccessEmail) {
-      this.successTopic = new sns.Topic(this, 'SuccessTopic', {
-        topicName: 'line-report-daily-success',
-        displayName: 'LINE 用量回報服務每日成功通知',
-      });
-      this.successTopic.addSubscription(new subscriptions.EmailSubscription(dailySuccessEmail));
+    const outcomeRouter = new lambda.Function(this, 'OutcomeRouterFn', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/outcome_router'),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        FAILURE_ALERT_TOPIC_ARN: this.failureAlertTopic.topicArn,
+        DEBUG_OUTCOME_TOPIC_ARN: this.debugOutcomeTopic.topicArn,
+        ENABLE_DEBUG_OUTCOME_NOTICES: String(enableDebugOutcomeNotices),
+      },
+    });
 
-      new events.Rule(this, 'SnapshotSuccessEmailRule', {
-        description: 'Snapshot task 成功完成時寄送每日成功通知',
-        eventPattern: {
-          source: ['aws.ecs'],
-          detailType: ['ECS Task State Change'],
-          detail: {
-            clusterArn: [cdk.Stack.of(this).formatArn({
-              service: 'ecs',
-              resource: 'cluster',
-              resourceName: 'line-report',
-            })],
-            group: ['family:line-report-snapshot'],
-            lastStatus: ['STOPPED'],
-            desiredStatus: ['STOPPED'],
-            stopCode: ['EssentialContainerExited'],
-            containers: {
-              name: ['app'],
-              exitCode: [0],
-            },
-          },
-        },
-        targets: [new targets.SnsTopic(this.successTopic, {
-          message: events.RuleTargetInput.fromObject({
-            service: 'line-report',
-            event: 'snapshot-success',
-            clusterArn: events.EventField.fromPath('$.detail.clusterArn'),
-            taskArn: events.EventField.fromPath('$.detail.taskArn'),
-            taskDefinitionArn: events.EventField.fromPath('$.detail.taskDefinitionArn'),
-            stoppedAt: events.EventField.fromPath('$.detail.stoppedAt'),
-            stoppedReason: events.EventField.fromPath('$.detail.stoppedReason'),
-            exitCode: events.EventField.fromPath('$.detail.containers[0].exitCode'),
-            image: events.EventField.fromPath('$.detail.containers[0].image'),
-          }),
-        })],
-      });
-    }
+    this.failureAlertTopic.grantPublish(outcomeRouter);
+    this.debugOutcomeTopic.grantPublish(outcomeRouter);
 
-    // ── Log Metric Filter：擷取 ERROR 等級 log ───────────────────
+    new logs.SubscriptionFilter(this, 'OutcomeRouterSubscription', {
+      logGroup: this.logGroup,
+      destination: new destinations.LambdaDestination(outcomeRouter),
+      filterPattern: logs.FilterPattern.allEvents(),
+    });
+
     const errorMetricFilter = new logs.MetricFilter(this, 'ErrorMetricFilter', {
       logGroup: this.logGroup,
       metricNamespace: 'LineReport',
@@ -90,7 +100,6 @@ export class MonitoringStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    // ── CloudWatch Alarm：5 分鐘內 ERROR >= 1 次即告警 ───────────
     const errorAlarm = new cloudwatch.Alarm(this, 'ErrorAlarm', {
       alarmName: 'line-report-error-alarm',
       alarmDescription: 'LINE 用量回報服務出現錯誤',
@@ -104,36 +113,91 @@ export class MonitoringStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alarmTopic));
+    errorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.failureAlertTopic));
 
-    // ── Log Metric Filter：快照成功計數（含 idempotent 略過）────────────────
-    // 兩種訊息皆視為「今日快照已成功」，否則 idempotent 略過時會誤觸 snapshot-missing 告警
-    const snapshotSuccessFilter = new logs.MetricFilter(this, 'SnapshotSuccessFilter', {
-      logGroup: this.logGroup,
-      metricNamespace: 'LineReport',
-      metricName: 'SnapshotSuccessCount',
-      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', '快照執行完成'),
-      metricValue: '1',
-      defaultValue: 0,
+    const heartbeatChecker = new lambda.Function(this, 'HeartbeatCheckerFn', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/heartbeat_checker'),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        JOB_RUNS_TABLE: 'job_runs',
+        DAILY_SNAPSHOT_SCHEDULE_NAME: 'line-report-daily-snapshot',
+        MONTHLY_REPORT_SCHEDULE_NAME: 'line-report-monthly-report',
+        SNAPSHOT_HOUR: snapshotHour,
+        SNAPSHOT_MINUTE: snapshotMinute,
+        REPORT_MODE: reportMode,
+        REPORT_DAY: reportDay,
+        REPORT_WEEK: reportWeek,
+        REPORT_WEEKDAY: reportWeekday,
+        REPORT_HOUR: reportHour,
+        HEARTBEAT_NAMESPACE: 'LineReportHeartbeat',
+      },
     });
 
-    const snapshotIdempotentFilter = new logs.MetricFilter(this, 'SnapshotIdempotentFilter', {
-      logGroup: this.logGroup,
-      metricNamespace: 'LineReport',
-      metricName: 'SnapshotSuccessCount',
-      filterPattern: logs.FilterPattern.stringValue('$.msg', '=', '今日快照已成功完成，略過（idempotent）'),
-      metricValue: '1',
-      defaultValue: 0,
+    heartbeatChecker.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem'],
+        resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/job_runs`],
+      })
+    );
+    heartbeatChecker.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['scheduler:GetSchedule'],
+        resources: [
+          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/line-report-daily-snapshot`,
+          `arn:aws:scheduler:${this.region}:${this.account}:schedule/default/line-report-monthly-report`,
+        ],
+      })
+    );
+    heartbeatChecker.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      })
+    );
+
+    new events.Rule(this, 'SnapshotHeartbeatCheckSchedule', {
+      schedule: events.Schedule.cron({
+        minute: '0',
+        hour: '0',
+      }),
+      targets: [
+        new targets.LambdaFunction(heartbeatChecker, {
+          event: events.RuleTargetInput.fromObject({ checks: ['snapshot'] }),
+        }),
+      ],
     });
 
-    // ── CloudWatch Alarm：26 小時無快照成功即告警（偵測容器完全沒執行）──
-    // treatMissingData=BREACHING 確保若 log group 完全沒有資料也會觸發告警
+    new events.Rule(this, 'ReportHeartbeatCheckSchedule', {
+      schedule: events.Schedule.cron({
+        minute: '5',
+        hour: '0',
+      }),
+      targets: [
+        new targets.LambdaFunction(heartbeatChecker, {
+          event: events.RuleTargetInput.fromObject({ checks: ['report'] }),
+        }),
+      ],
+    });
+
+    new events.Rule(this, 'ScheduleEnabledCheckSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.hours(6)),
+      targets: [
+        new targets.LambdaFunction(heartbeatChecker, {
+          event: events.RuleTargetInput.fromObject({ checks: ['schedules'] }),
+        }),
+      ],
+    });
+
     const snapshotMissingAlarm = new cloudwatch.Alarm(this, 'SnapshotMissingAlarm', {
       alarmName: 'line-report-snapshot-missing',
-      alarmDescription: '超過 26 小時未收到快照成功 log，任務可能未執行（容器啟動失敗或靜默錯誤）',
-      metric: snapshotSuccessFilter.metric({
-        period: cdk.Duration.hours(26),
-        statistic: 'Sum',
+      alarmDescription: '每日快照在預期時間後仍未成功，請檢查 Scheduler、ECS 與 job_runs',
+      metric: new cloudwatch.Metric({
+        namespace: 'LineReportHeartbeat',
+        metricName: 'SnapshotHealthy',
+        period: cdk.Duration.days(1),
+        statistic: 'Minimum',
       }),
       threshold: 1,
       evaluationPeriods: 1,
@@ -141,22 +205,106 @@ export class MonitoringStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     });
 
-    snapshotMissingAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alarmTopic));
+    snapshotMissingAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.heartbeatAlertTopic));
+
+    const reportMissingAlarm = new cloudwatch.Alarm(this, 'ReportMissingAlarm', {
+      alarmName: 'line-report-report-missing',
+      alarmDescription: '每月回報在最近一次排程後仍未成功，請檢查 Scheduler、cron 與 job_runs',
+      metric: new cloudwatch.Metric({
+        namespace: 'LineReportHeartbeat',
+        metricName: 'ReportHealthy',
+        period: cdk.Duration.days(1),
+        statistic: 'Minimum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    });
+
+    reportMissingAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.heartbeatAlertTopic));
+
+    const dailySnapshotScheduleDisabledAlarm = new cloudwatch.Alarm(
+      this,
+      'DailySnapshotScheduleDisabledAlarm',
+      {
+        alarmName: 'line-report-daily-snapshot-schedule-disabled',
+        alarmDescription: '每日快照排程不是 ENABLED，請檢查 EventBridge Scheduler 設定',
+        metric: new cloudwatch.Metric({
+          namespace: 'LineReportHeartbeat',
+          metricName: 'DailySnapshotScheduleEnabled',
+          period: cdk.Duration.hours(6),
+          statistic: 'Minimum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      }
+    );
+
+    dailySnapshotScheduleDisabledAlarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(this.heartbeatAlertTopic)
+    );
+
+    const monthlyReportScheduleDisabledAlarm = new cloudwatch.Alarm(
+      this,
+      'MonthlyReportScheduleDisabledAlarm',
+      {
+        alarmName: 'line-report-monthly-report-schedule-disabled',
+        alarmDescription: '每月回報排程不是 ENABLED，請檢查 EventBridge Scheduler 設定',
+        metric: new cloudwatch.Metric({
+          namespace: 'LineReportHeartbeat',
+          metricName: 'MonthlyReportScheduleEnabled',
+          period: cdk.Duration.hours(6),
+          statistic: 'Minimum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      }
+    );
+
+    monthlyReportScheduleDisabledAlarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(this.heartbeatAlertTopic)
+    );
+
+    const heartbeatCheckerErrorAlarm = new cloudwatch.Alarm(this, 'HeartbeatCheckerErrorAlarm', {
+      alarmName: 'line-report-heartbeat-checker-error',
+      alarmDescription: 'Heartbeat checker Lambda 執行失敗，請檢查 Lambda log 與權限設定',
+      metric: heartbeatChecker.metricErrors({
+        period: cdk.Duration.hours(6),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    heartbeatCheckerErrorAlarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(this.failureAlertTopic)
+    );
 
     new cdk.CfnOutput(this, 'LogGroupName', {
       value: this.logGroup.logGroupName,
       exportName: 'LineReportLogGroupName',
     });
 
-    new cdk.CfnOutput(this, 'AlarmTopicArn', {
-      value: this.alarmTopic.topicArn,
-      exportName: 'LineReportAlarmTopicArn',
+    new cdk.CfnOutput(this, 'FailureAlertTopicArn', {
+      value: this.failureAlertTopic.topicArn,
+      exportName: 'LineReportFailureAlertTopicArn',
     });
 
-    if (this.successTopic) {
-      new cdk.CfnOutput(this, 'SuccessTopicArn', {
-        value: this.successTopic.topicArn,
-      });
-    }
+    new cdk.CfnOutput(this, 'HeartbeatAlertTopicArn', {
+      value: this.heartbeatAlertTopic.topicArn,
+      exportName: 'LineReportHeartbeatAlertTopicArn',
+    });
+
+    new cdk.CfnOutput(this, 'DebugOutcomeTopicArn', {
+      value: this.debugOutcomeTopic.topicArn,
+      exportName: 'LineReportDebugOutcomeTopicArn',
+    });
   }
 }

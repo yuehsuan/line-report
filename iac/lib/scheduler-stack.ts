@@ -14,14 +14,14 @@ import { buildReportCron, buildSnapshotCron } from './cron-builder';
 // 也不會把 EcsStack 列為 SchedulerStack 的 dependency，
 // 因此每次更新 imageTag 不會再遇到「export in use」的部署卡住問題。
 export interface SchedulerStackProps extends cdk.StackProps {
-  alarmTopicArn?: string;
+  failureAlertTopicArn?: string;
 }
 
 export class SchedulerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: SchedulerStackProps) {
     super(scope, id, props);
 
-    const { alarmTopicArn } = props;
+    const { failureAlertTopicArn } = props;
 
     // VPC lookup（context 已在首次 cdk synth 時快取）
     const vpc = ec2.Vpc.fromLookup(this, 'DefaultVpc', { isDefault: true });
@@ -98,9 +98,13 @@ export class SchedulerStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    if (alarmTopicArn) {
-      const alarmTopic = sns.Topic.fromTopicArn(this, 'AlarmTopic', alarmTopicArn);
-      dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alarmTopic));
+    if (failureAlertTopicArn) {
+      const failureAlertTopic = sns.Topic.fromTopicArn(
+        this,
+        'FailureAlertTopic',
+        failureAlertTopicArn
+      );
+      dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(failureAlertTopic));
     }
 
     const networkConfig = {

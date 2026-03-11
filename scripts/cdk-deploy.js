@@ -1,7 +1,7 @@
 /**
  * cdk-deploy.js — CDK 部署輔助腳本
  *
- * 從 .env 讀取排程設定與告警 Email，轉換為 CDK context 傳入。
+ * 從 .env 讀取排程設定與通知 Email，轉換為 CDK context 傳入。
  * 透過 npm run deploy 呼叫（--env-file=.env 已在 package.json 設定）。
  *
  * 使用方式：
@@ -17,13 +17,15 @@
  *   REPORT_HOUR      每月回報時（預設 9）
  *   SNAPSHOT_HOUR    每日快照時（預設 23）
  *   SNAPSHOT_MINUTE  每日快照分（預設 55）
- *   ALARM_EMAIL      告警 Email（必填）
- *   DAILY_SUCCESS_EMAIL 每日 snapshot 成功通知 Email（選填）
+ *   ALARM_EMAIL      Failure/Heartbeat 告警 Email（選填）
+ *   DEBUG_EMAIL      Debug/Outcome 通知 Email（選填）
+ *   ENABLE_DEBUG_OUTCOME_NOTICES Debug 通知開關（預設 true）
  */
 
 import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { resolve } from 'path';
+import { parseDeployArgs } from './lib/deploy-args.js';
 
 const imageTag = process.env.IMAGE_TAG;
 if (!imageTag) {
@@ -36,17 +38,13 @@ if (imageTag === 'latest') {
 }
 
 const alarmEmail = process.env.ALARM_EMAIL;
-const dailySuccessEmail = process.env.DAILY_SUCCESS_EMAIL;
-if (!alarmEmail) {
-  console.error('[cdk-deploy] 錯誤：ALARM_EMAIL 未設定。正式部署禁止省略告警收件人，避免 deploy 時刪除 SNS subscription。');
-  process.exit(1);
-}
-if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(alarmEmail)) {
+const debugEmail = process.env.DEBUG_EMAIL;
+if (alarmEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(alarmEmail)) {
   console.error(`[cdk-deploy] 錯誤：ALARM_EMAIL 格式不合法：${alarmEmail}`);
   process.exit(1);
 }
-if (dailySuccessEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(dailySuccessEmail)) {
-  console.error(`[cdk-deploy] 錯誤：DAILY_SUCCESS_EMAIL 格式不合法：${dailySuccessEmail}`);
+if (debugEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(debugEmail)) {
+  console.error(`[cdk-deploy] 錯誤：DEBUG_EMAIL 格式不合法：${debugEmail}`);
   process.exit(1);
 }
 
@@ -71,8 +69,11 @@ const contextArgs = [
   `reportHour=${process.env.REPORT_HOUR    || '9'}`,
   `snapshotHour=${process.env.SNAPSHOT_HOUR  || '23'}`,
   `snapshotMinute=${process.env.SNAPSHOT_MINUTE || '55'}`,
-  `alarmEmail=${alarmEmail}`,
-  ...(dailySuccessEmail ? [`dailySuccessEmail=${dailySuccessEmail}`] : []),
+  ...(alarmEmail
+    ? [`failureAlertEmail=${alarmEmail}`, `heartbeatAlertEmail=${alarmEmail}`]
+    : []),
+  ...(debugEmail ? [`debugEmail=${debugEmail}`] : []),
+  `enableDebugOutcomeNotices=${process.env.ENABLE_DEBUG_OUTCOME_NOTICES || 'true'}`,
 ].flatMap((ctx) => ['--context', ctx]);
 
 // AWS_PROFILE → --profile（確保 SSO profile 正確傳入 CDK）
@@ -82,11 +83,13 @@ const profileArgs = process.env.AWS_PROFILE
 
 // CLI 追加參數（如 stack 名稱）
 // 例：npm run deploy -- LineReportSchedulerStack   ← 只部署該 stack
+//     npm run deploy -- --stacks LineReportSchedulerStack ← 相容舊文件寫法
 //     npm run deploy                               ← 部署全部（--all）
-const extraArgs = process.argv.slice(2);
-// 判斷是否有傳入 stack 名稱（不以 -- 開頭的參數視為 stack 名稱）
-const hasStackNames = extraArgs.some((a) => !a.startsWith('--'));
-const requestedStacks = extraArgs.filter((a) => !a.startsWith('--'));
+const {
+  normalizedArgs: extraArgs,
+  hasStackNames,
+  requestedStacks,
+} = parseDeployArgs(process.argv.slice(2));
 
 function shouldVerifyStack(stackName) {
   return requestedStacks.length === 0 || requestedStacks.includes(stackName);
@@ -156,50 +159,6 @@ function verifyScheduleState(name, expectedTaskFamily) {
   console.log(`[cdk-deploy] 驗證通過：${name} 已啟用，指向 ${expectedTaskFamily}`);
 }
 
-function verifyAlarmSubscription(accountId) {
-  const topicArn = `arn:aws:sns:${process.env.AWS_REGION || 'ap-northeast-1'}:${accountId}:line-report-alarms`;
-  const data = runAwsJson(
-    ['sns', 'list-subscriptions-by-topic', '--topic-arn', topicArn],
-    '[cdk-deploy] 無法查詢 SNS alarm topic subscriptions'
-  );
-  const subscriptions = data.Subscriptions || [];
-  const matched = subscriptions.find((s) => s.Endpoint === alarmEmail);
-
-  if (!matched) {
-    console.error(`[cdk-deploy] 部署後驗證失敗：alarm topic 缺少收件人 ${alarmEmail}`);
-    process.exit(1);
-  }
-  if (matched.SubscriptionArn === 'PendingConfirmation') {
-    console.error(`[cdk-deploy] 部署後需人工完成：${alarmEmail} 尚未確認 SNS 訂閱，請點擊確認信後再重試驗證。`);
-    process.exit(1);
-  }
-
-  console.log(`[cdk-deploy] 驗證通過：alarm topic 已綁定 ${alarmEmail}`);
-}
-
-function verifyOptionalSubscription(accountId, topicName, email, label) {
-  if (!email) return;
-
-  const topicArn = `arn:aws:sns:${process.env.AWS_REGION || 'ap-northeast-1'}:${accountId}:${topicName}`;
-  const data = runAwsJson(
-    ['sns', 'list-subscriptions-by-topic', '--topic-arn', topicArn],
-    `[cdk-deploy] 無法查詢 SNS topic subscriptions：${topicName}`
-  );
-  const subscriptions = data.Subscriptions || [];
-  const matched = subscriptions.find((s) => s.Endpoint === email);
-
-  if (!matched) {
-    console.error(`[cdk-deploy] 部署後驗證失敗：${label} topic 缺少收件人 ${email}`);
-    process.exit(1);
-  }
-  if (matched.SubscriptionArn === 'PendingConfirmation') {
-    console.error(`[cdk-deploy] 部署後需人工完成：${email} 尚未確認 ${label} 訂閱，請點擊確認信後再重試驗證。`);
-    process.exit(1);
-  }
-
-  console.log(`[cdk-deploy] 驗證通過：${label} topic 已綁定 ${email}`);
-}
-
 // fileURLToPath 正確處理路徑中的中文/特殊字元
 const iacDir = fileURLToPath(new URL('../iac', import.meta.url));
 // 直接使用 iac/node_modules/.bin/cdk，不依賴 PATH 裡有沒有 npx
@@ -241,11 +200,6 @@ if (result.status !== 0) {
 }
 
 const expectedImage = `${identity.Account}.dkr.ecr.${process.env.AWS_REGION || 'ap-northeast-1'}.amazonaws.com/line-report:${imageTag}`;
-
-if (shouldVerifyStack('LineReportMonitoringStack')) {
-  verifyAlarmSubscription(identity.Account);
-  verifyOptionalSubscription(identity.Account, 'line-report-daily-success', dailySuccessEmail, 'daily success');
-}
 
 if (shouldVerifyStack('LineReportEcsStack')) {
   verifyTaskDefinitionImage('line-report-snapshot', expectedImage);

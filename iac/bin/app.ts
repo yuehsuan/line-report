@@ -17,16 +17,11 @@ const env: cdk.Environment = {
 
 // 正式部署只允許透過 repo root 的部署腳本帶入必要 context。
 const imageTag = app.node.tryGetContext('imageTag');
-const alarmEmail = app.node.tryGetContext('alarmEmail');
-
 if (!imageTag) {
   throw new Error('[CDK] 缺少必填 context: imageTag。請改用 repo root 的 `npm run deploy`，勿直接執行 `cdk deploy`。');
 }
 if (imageTag === 'latest') {
   throw new Error('[CDK] imageTag 不得使用 "latest"，請指定明確版本 tag（如 v20260225-1 或 sha-xxxxxxx）');
-}
-if (!alarmEmail) {
-  throw new Error('[CDK] 缺少必填 context: alarmEmail。請改用 repo root 的 `npm run deploy`，勿直接執行 `cdk deploy`。');
 }
 
 const dbStack = new DatabaseStack(app, 'LineReportDatabaseStack', { env });
@@ -48,7 +43,7 @@ const ecsStack = new EcsStack(app, 'LineReportEcsStack', {
 
 new SchedulerStack(app, 'LineReportSchedulerStack', {
   env,
-  alarmTopicArn: monitoringStack.alarmTopic.topicArn,
+  failureAlertTopicArn: monitoringStack.failureAlertTopic.topicArn,
 });
 
 app.synth();

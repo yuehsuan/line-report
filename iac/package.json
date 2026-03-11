@@ -7,11 +7,11 @@
     "build": "tsc",
     "watch": "tsc -w",
     "cdk": "cdk",
-    "deploy": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing imageTag/alarmEmail context.'); process.exit(1)\"",
-    "deploy:stack": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing imageTag/alarmEmail context.'); process.exit(1)\"",
+    "deploy": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing deployment context.'); process.exit(1)\"",
+    "deploy:stack": "node -e \"console.error('Use repo root: npm run deploy -- [stacks]. Direct deploy from iac/ is blocked to prevent missing deployment context.'); process.exit(1)\"",
     "diff": "cdk diff --all",
     "synth": "cdk synth --all",
-    "test": "tsc && node --test dist/unit-tests/cron-builder.test.js"
+    "test": "tsc && node --test dist/unit-tests/*.test.js"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.177.0",
