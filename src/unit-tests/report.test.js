@@ -39,6 +39,8 @@ after(() => {
 
 beforeEach(() => {
   ddbMock.reset();
+  pushedMessages = [];
+  process.env.DRY_RUN = 'false';
 });
 
 let pushedMessages = [];
@@ -80,6 +82,7 @@ describe('buildReportMessage', () => {
 
     assert.match(message, /期間：2026\/01（指定月份）/);
     assert.doesNotMatch(message, /前月/);
+    assert.match(message, /historical backfill 月結/);
   });
 });
 
@@ -94,6 +97,34 @@ describe('runReport - 幂等略過', () => {
 
     assert.equal(pushedMessages.length, 0, '不應重送任何 LINE 訊息');
     assert.equal(ddbMock.commandCalls(PutCommand).length, 0, '不應再更新 job_run');
+  });
+});
+
+describe('runReport - DRY_RUN 可重跑', () => {
+  test('report-dry-run success 後仍應允許再次 dry-run 以取得最新 preview', async () => {
+    pushedMessages = [];
+    ddbMock.on(GetCommand).resolves({
+      Item: { jobId: 'report-dry-run#2026-01', status: 'success', attempts: 1, deliveredTargets: [] },
+    });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        monthKey: '2026-01',
+        ts: '2026-01-31T15:55:00.000Z',
+        effectiveTs: '2026-01-31T15:58:00.000Z',
+        totalUsage: 8100,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
+      }],
+    });
+
+    await runReport({ month: '2026-01', dryRun: true });
+
+    const runningCall = ddbMock.commandCalls(PutCommand).find(
+      (c) => c.args[0].input.Item?.jobId === 'report-dry-run#2026-01' && c.args[0].input.Item?.status === 'running',
+    );
+    assert.ok(runningCall, 'dry-run success 後應允許再次 claim/report');
+    assert.equal(runningCall.args[0].input.ExpressionAttributeValues[':allowed1'], 'success');
   });
 });
 
@@ -114,7 +145,8 @@ describe('runReport - 部分送出後重跑', () => {
         monthKey: '2026-01',
         ts: '2026-01-31T15:55:00.000Z',
         totalUsage: 8000,
-        isPrevMonthFinal: true,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
       }],
     });
 
@@ -138,9 +170,8 @@ describe('runReport - 部分送出後重跑', () => {
   });
 });
 
-describe('runReport - 找不到 prevMonthFinal', () => {
+describe('runReport - 找不到 official final', () => {
   test('job_run 應記錄 status=failed 且含 lastError', withMockedExit(async () => {
-    pushedMessages = [];
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(QueryCommand).resolves({ Items: [] });
@@ -155,7 +186,7 @@ describe('runReport - 找不到 prevMonthFinal', () => {
       (c) => c.args[0].input.Item?.status === 'failed',
     );
     assert.ok(failedCall, '應寫入 failed job_run');
-    assert.match(failedCall.args[0].input.Item.lastError, /prevMonthFinal/);
+    assert.match(failedCall.args[0].input.Item.lastError, /official final/);
     assert.equal(pushedMessages.length, 0, '找不到快照時不應送 LINE');
   }));
 });
@@ -169,8 +200,10 @@ describe('runReport - 正常執行', () => {
       Items: [{
         monthKey: '2026-01',
         ts: '2026-01-31T15:55:00.000Z',
+        effectiveTs: '2026-01-31T15:58:00.000Z',
         totalUsage: 8000,
-        isPrevMonthFinal: true,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
       }],
     });
 
@@ -191,5 +224,62 @@ describe('runReport - 正常執行', () => {
     assert.equal(successCall.args[0].input.Item.feeRounded, 400);
     assert.equal(successCall.args[0].input.Item.planFee, 1200);
     assert.equal(successCall.args[0].input.Item.totalFeeRounded, 1600);
+  });
+});
+
+describe('runReport - DRY_RUN 不阻塞正式發送', () => {
+  test('DRY_RUN=true 時應使用 report-dry-run jobId，而非正式 report jobId', async () => {
+    process.env.DRY_RUN = 'true';
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        monthKey: '2026-01',
+        ts: '2026-01-31T15:55:00.000Z',
+        effectiveTs: '2026-01-31T15:58:00.000Z',
+        totalUsage: 8000,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
+      }],
+    });
+
+    await runReport({ month: '2026-01' });
+
+    const jobIds = ddbMock.commandCalls(PutCommand)
+      .map((c) => c.args[0].input.Item?.jobId)
+      .filter(Boolean);
+    assert.ok(jobIds.includes('report-dry-run#2026-01'));
+    assert.ok(!jobIds.includes('report#2026-01'));
+  });
+
+  test('顯式 dryRun=true 且環境變數未開時，也不應真的呼叫 pushMessage', async () => {
+    process.env.DRY_RUN = 'false';
+    pushedMessages = [];
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        monthKey: '2026-01',
+        ts: '2026-01-31T15:55:00.000Z',
+        effectiveTs: '2026-01-31T15:58:00.000Z',
+        totalUsage: 8000,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
+      }],
+    });
+
+    await runReport({ month: '2026-01', dryRun: true });
+
+    assert.equal(pushedMessages.length, 0, 'dryRun=true 不應真的呼叫 pushMessage');
+
+    const successCall = ddbMock.commandCalls(PutCommand).find(
+      (c) => c.args[0].input.Item?.status === 'success',
+    );
+    assert.ok(successCall, '應寫入 dry-run success job_run');
+    assert.deepEqual(
+      successCall.args[0].input.Item.deliveredTargets,
+      ['U_target_1', 'U_target_2'],
+      'dry-run 仍應記錄模擬送達的 targets',
+    );
   });
 });

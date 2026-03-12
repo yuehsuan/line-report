@@ -1,4 +1,4 @@
-import { getNowTaipei, getMonthKey, getPrevMonthKey, getDateKey, toUtcIso } from '../lib/date.js';
+import { getNowTaipei, getMonthKey, getPrevMonthKey, getDateKey, getLiveSnapshotTs } from '../lib/date.js';
 import { getConsumption } from '../lib/lineApi.js';
 import { writeSnapshot, querySnapshots, getPrevMonthFinalSnapshot, markPrevMonthFinal, getJobRun, upsertJobRun } from '../lib/storage.js';
 import { createLogger } from '../lib/logger.js';
@@ -9,7 +9,7 @@ export async function runSnapshot() {
   const now = getNowTaipei();
   const monthKey = getMonthKey(now);
   const dateKey = getDateKey(now);
-  const ts = toUtcIso(now);
+  const ts = getLiveSnapshotTs(now);
   const jobId = `snapshot#${dateKey}`;
 
   log.info({ monthKey, dateKey, ts }, '開始執行快照');

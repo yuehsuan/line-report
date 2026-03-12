@@ -7,13 +7,30 @@ import {
   GetCommand,
   QueryCommand,
   UpdateCommand,
+  DeleteCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 
 // ── 設定 mock（必須在 import storage 之前）────────────────────────
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // 動態 import 確保 mock 已設定
-const { writeSnapshot, getPrevMonthFinalSnapshot, markPrevMonthFinal, claimJobRun, getJobRun, upsertJobRun } =
+const {
+  writeSnapshot,
+  writeBackfillSnapshot,
+  getPrevMonthFinalSnapshot,
+  getOfficialFinalSnapshot,
+  getOfficialFinalSnapshots,
+  deleteSnapshotsBySource,
+  deleteSnapshotsByBuild,
+  deleteHistoricalBackfillBuildsExcept,
+  getBackfillStorageTs,
+  promoteBackfillBuild,
+  markPrevMonthFinal,
+  claimJobRun,
+  getJobRun,
+  upsertJobRun,
+} =
   await import('../lib/storage.js');
 
 beforeEach(() => {
@@ -87,6 +104,43 @@ describe('getPrevMonthFinalSnapshot', () => {
     const result = await getPrevMonthFinalSnapshot('2026-01');
     assert.ok(result !== null);
     assert.equal(result.ts, '2026-01-31T15:55:00.000Z');
+  });
+});
+
+describe('getOfficialFinalSnapshot', () => {
+  test('找不到 official final 時應回傳 null', async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    const result = await getOfficialFinalSnapshot('2026-03');
+    assert.equal(result, null);
+  });
+
+  test('找到單筆 official final 時正確回傳', async () => {
+    const items = [
+      { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z', totalUsage: 5200, source: 'historical_backfill', isOfficialFinal: true },
+    ];
+    ddbMock.on(QueryCommand).resolves({ Items: items });
+    const result = await getOfficialFinalSnapshot('2026-03');
+    assert.ok(result !== null);
+    assert.equal(result.ts, '2026-03-31T15:58:00.000Z');
+  });
+
+  test('多筆 official final 時應拋出錯誤', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { monthKey: '2026-03', ts: '2026-03-30T15:58:00.000Z', totalUsage: 5000, source: 'historical_backfill', isOfficialFinal: true },
+        { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z', totalUsage: 5200, source: 'historical_backfill', isOfficialFinal: true },
+      ],
+    });
+
+    await assert.rejects(() => getOfficialFinalSnapshot('2026-03'), /多筆 official final/);
+  });
+
+  test('getOfficialFinalSnapshots 可回傳所有 official final 候選', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ monthKey: '2026-03', ts: 'a', source: 'historical_backfill', isOfficialFinal: true }],
+    });
+    const result = await getOfficialFinalSnapshots('2026-03');
+    assert.equal(result.length, 1);
   });
 });
 
@@ -177,6 +231,104 @@ describe('upsertJobRun', () => {
     const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
     assert.ok(typeof item.ttl === 'number', 'ttl 應為 number');
     assert.ok(item.ttl >= beforeTs && item.ttl <= afterTs, 'ttl 應在 90 天後的合理範圍');
+  });
+});
+
+describe('writeBackfillSnapshot', () => {
+  test('正常寫入 historical_backfill', async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await assert.doesNotReject(() => writeBackfillSnapshot({
+      monthKey: '2026-03',
+      ts: getBackfillStorageTs('2026-03-31T15:58:00.000Z', 'build-1'),
+      effectiveTs: '2026-03-31T15:58:00.000Z',
+      totalUsage: 5200,
+      rawJson: '{"status":"ready"}',
+      sourceDate: '2026-03-31',
+      backfillBuildId: 'build-1',
+      isOfficialFinal: true,
+    }));
+
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+    assert.equal(item.source, 'historical_backfill');
+    assert.equal(item.isOfficialFinal, true);
+    assert.equal(item.sourceDate, '2026-03-31');
+    assert.equal(item.backfillBuildId, 'build-1');
+  });
+});
+
+describe('deleteSnapshotsBySource', () => {
+  test('應刪除指定月份與來源的所有快照', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { monthKey: '2026-03', ts: '2026-03-01T15:58:00.000Z', source: 'historical_backfill' },
+        { monthKey: '2026-03', ts: '2026-03-02T15:58:00.000Z', source: 'historical_backfill' },
+      ],
+    });
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const count = await deleteSnapshotsBySource('2026-03', 'historical_backfill');
+
+    assert.equal(count, 2);
+    assert.equal(ddbMock.commandCalls(DeleteCommand).length, 2);
+  });
+});
+
+describe('deleteSnapshotsByBuild', () => {
+  test('應刪除指定 build 的所有快照', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { monthKey: '2026-03', ts: '2026-03-01T15:58:00.000Z#historical_backfill#build-1', source: 'historical_backfill', backfillBuildId: 'build-1' },
+        { monthKey: '2026-03', ts: '2026-03-02T15:58:00.000Z#historical_backfill#build-1', source: 'historical_backfill', backfillBuildId: 'build-1' },
+      ],
+    });
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const count = await deleteSnapshotsByBuild('2026-03', 'historical_backfill', 'build-1');
+
+    assert.equal(count, 2);
+    assert.equal(ddbMock.commandCalls(DeleteCommand).length, 2);
+  });
+});
+
+describe('deleteHistoricalBackfillBuildsExcept', () => {
+  test('應保留指定 build，刪除其他 build rows', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z#historical_backfill#build-new', source: 'historical_backfill', backfillBuildId: 'build-new' },
+        { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z#historical_backfill#build-old', source: 'historical_backfill', backfillBuildId: 'build-old' },
+        { monthKey: '2026-03', ts: '2026-03-30T15:58:00.000Z#historical_backfill#build-old', source: 'historical_backfill', backfillBuildId: 'build-old' },
+      ],
+    });
+    ddbMock.on(DeleteCommand).resolves({});
+
+    const count = await deleteHistoricalBackfillBuildsExcept('2026-03', ['build-new']);
+
+    assert.equal(count, 2);
+    assert.equal(ddbMock.commandCalls(DeleteCommand).length, 2);
+  });
+});
+
+describe('promoteBackfillBuild', () => {
+  test('應以 transact write 原子切換 official final', async () => {
+    ddbMock.on(QueryCommand)
+      .resolvesOnce({
+        Items: [
+          { monthKey: '2026-03', ts: '2026-03-30T15:58:00.000Z#historical_backfill#build-new', backfillBuildId: 'build-new' },
+          { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z#historical_backfill#build-new', backfillBuildId: 'build-new' },
+        ],
+      })
+      .resolvesOnce({
+        Items: [
+          { monthKey: '2026-03', ts: '2026-03-31T15:58:00.000Z#historical_backfill#build-old', isOfficialFinal: true },
+        ],
+      });
+    ddbMock.on(TransactWriteCommand).resolves({});
+
+    const result = await promoteBackfillBuild('2026-03', 'build-new');
+
+    assert.equal(result.ts, '2026-03-31T15:58:00.000Z#historical_backfill#build-new');
+    assert.equal(ddbMock.commandCalls(TransactWriteCommand).length, 1);
   });
 });
 

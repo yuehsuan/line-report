@@ -1,6 +1,6 @@
 # LINE 訊息用量回報服務
 
-LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署於 AWS ECS Fargate，以 EventBridge Scheduler 排程每日快照與每月回報。
+LINE 官方帳號「訊息用量與加購費用估算」自動化服務，部署於 AWS ECS Fargate，以 EventBridge Scheduler 排程每日快照與每月回報，並支援按月回補 LINE 歷史用量作為正式月報依據。
 
 ---
 
@@ -42,13 +42,20 @@ EventBridge Scheduler
   ├─ 每日 23:55 (台北時間)
   │       └──→ ECS Fargate：snapshot task
   │                 ├── 呼叫 LINE API 取得當月訊息用量
-  │                 └── 寫入 DynamoDB (usage_snapshots + job_runs)
+  │                 └── 寫入 DynamoDB (usage_snapshots[source=live_snapshot] + job_runs)
   │
   └─ 每月 (預設 11 日 09:00)
-          └──→ ECS Fargate：report task
-                    ├── 從 DynamoDB 讀取上月最終快照
+          └──→ ECS Fargate：monthly close task
+                    ├── 確保 historical_backfill 的 official final 已存在
+                    ├── 呼叫 report-only 讀取 official final
                     ├── 計算加購費用
                     └── 推播報告到 LINE 群組
+
+手動 / 維運 CLI
+  └──→ backfill --month=YYYY-MM
+            ├── 呼叫 LINE daily delivery insight
+            ├── 先 staged 寫入 usage_snapshots[source=historical_backfill]
+            └── 成功後原子切換該月 isOfficialFinal=true
 
 SSM Parameter Store  ──→  ECS 容器啟動時自動注入 Token / 設定
 CloudWatch Logs      ←──  ECS 容器輸出 JSON log
@@ -57,7 +64,7 @@ EventBridge Rule ──→ Lambda(heartbeat checker) ──→ CloudWatch Metric
 CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 ```
 
-**用一句話理解：** 排程器每天自動紀錄 LINE 訊息用量；每個月從紀錄中計算費用，並自動推播報告到指定的 LINE 群組。
+**用一句話理解：** 每日 snapshot 提供即時觀測；正式月報改讀按月 backfill 後的 official final，再計算費用並推播到指定的 LINE 群組。
 
 ### IaC 架構與頻率
 
@@ -89,7 +96,8 @@ CloudWatch Alarm     ──→  SNS Topic  ──→  Email 告警
 
 - **每日快照**（23:55 Asia/Taipei）：呼叫 LINE Messaging API 取得當月用量，存入 DynamoDB
 - **跨月封存**：月份變更時自動標記上月最後一筆快照為 `prevMonthFinal`，並支援補封存
-- **每月回報**（每月 11 日 09:00 Asia/Taipei）：計算加購費用，推播繁中訊息到指定 LINE 群組
+- **按月回補**（手動 / CLI）：呼叫 LINE daily delivery insight，重建指定月份累積用量並標記 `isOfficialFinal`
+- **每月月結**（每月 11 日 09:00 Asia/Taipei）：由 orchestration 確保 `historical_backfill + isOfficialFinal=true` 已存在，再讀取正式月結資料推播繁中訊息到指定 LINE 群組
 - **幂等性**：daily snapshot 同一天重複觸發不會重複寫入；monthly report 同月份成功送出後不會重送，失敗重跑時只會補送未成功 target
 
 ---
@@ -102,18 +110,20 @@ line-report/
 │   ├── index.js              # CLI entry
 │   ├── actions/
 │   │   ├── snapshot.js       # 每日快照邏輯
-│   │   └── report.js         # 每月回報邏輯
+│   │   ├── backfill.js       # 指定月份歷史回補邏輯
+│   │   ├── monthlyClose.js   # 月結 orchestration（確保 final 後再回報）
+│   │   └── report.js         # 純讀取/推播正式月報
 │   ├── lib/
 │   │   ├── date.js           # Asia/Taipei 日期工具（luxon）
 │   │   ├── db.js             # DynamoDB DocumentClient v3
 │   │   ├── lineApi.js        # LINE API 封裝
 │   │   ├── logger.js         # pino logger（JSON）
 │   │   ├── pricing.js        # 計費模型
-│   │   └── storage.js        # 快照 CRUD + prevMonthFinal
+│   │   └── storage.js        # 快照 CRUD + prevMonthFinal / official final
 │   └── unit-tests/           # 單元測試 / 整合測試
 ├── scripts/
 │   ├── cdk-deploy.js         # CDK 一鍵部署腳本
-│   ├── dry-run.js            # 本機驗證腳本（DynamoDB Local + snapshot/report）
+│   ├── dry-run.js            # 本機驗證腳本（DynamoDB Local + snapshot/backfill/report）
 │   ├── sync-ssm.sh           # 同步本機 .env 到 SSM Parameter
 │   └── e2e-tests/            # E2E / smoke test 腳本
 ├── iac/                      # AWS CDK（TypeScript）
@@ -200,23 +210,48 @@ cp .env.example .env
 npm run snapshot
 ```
 
-### 4. 執行回報（前月）
+### 4. 執行月結回報（前月）
 
 ```bash
 npm run report
 ```
 
-### 5. 執行回報（指定月份）
+若只想讀取既有 official final 並推播，可用：
+
+```bash
+node --env-file=.env src/index.js report-only --month=prev
+```
+
+### 5. 執行回補（指定月份）
+
+```bash
+npm run backfill -- --month=2026-03
+```
+
+若該月份已經有 official final，預設會略過；要重建該月正式資料時，需顯式使用：
+
+```bash
+npm run backfill -- --month=2026-03 --rebuild=true
+```
+
+### 6. 執行回報（指定月份）
 
 ```bash
 node --env-file=.env src/index.js report --month=2026-01
 ```
 
-### 6. DRY_RUN 模式（跳過 LINE push，僅印出訊息）
+### 7. DRY_RUN 模式（跳過 LINE push，僅印出訊息）
 
 ```bash
 DRY_RUN=true npm run report
 ```
+
+## 資料來源分工
+
+- `live_snapshot`：每日即時觀測，來源為 `quota/consumption`，用於日常監控與估算
+- `historical_backfill`：指定月份歷史回補，來源為 LINE daily delivery insight，作為正式月報依據
+- `report`：CLI 預設執行 monthly close orchestration；真正唯讀的月報動作請使用 `report-only`
+- `backfill --rebuild=true`：高風險操作，會重建指定月份的正式月結資料
 
 ---
 
@@ -238,17 +273,19 @@ DRY_RUN=true npm run report
 npm test
 
 # 個別執行
+npm run test:backfill    # 按月回補與重建測試
 npm run test:pricing    # 計費模型測試
 npm run test:date       # 日期工具測試
 npm run test:storage    # DynamoDB 整合測試（使用 mock）
 npm run test:report     # 回報失敗場景測試（使用 mock）
+node --test src/unit-tests/monthlyClose.test.js   # 月結 orchestration 測試
 ```
 
 ---
 
 ## 本機完整流程驗證（dry-run）
 
-使用 DynamoDB Local 驗證完整 snapshot → report 流程，**不需要真實 AWS 帳號**：
+使用 DynamoDB Local 驗證完整 snapshot → monthly close 流程，**不需要真實 AWS 帳號**：
 
 ```bash
 # 1. 啟動 DynamoDB Local
@@ -257,20 +294,26 @@ docker run -d -p 8000:8000 amazon/dynamodb-local
 # 2. 在 .env 中取消 AWS_ENDPOINT_URL 的註解
 # AWS_ENDPOINT_URL=http://localhost:8000  →  移除 # 號
 
-# 3. 執行完整流程（會自動建表、seed 上月假資料、跑 snapshot + report）
+# 3. 執行完整流程（會自動建表、跑 snapshot + monthly close dry-run）
 npm run dry-run
 
 # 4. 只跑快照
 npm run dry-run -- --step=snapshot
 
-# 5. 只跑回報
+# 5. 只跑回補（DRY_RUN）
+npm run dry-run -- --step=backfill
+
+# 6. 只跑月結回報
 npm run dry-run -- --step=report
 
-# 6. 查看 DB 內容
+# 7. 查看 DB 內容
 npm run dry-run -- --inspect
 ```
 
-> **注意**：`npm run dry-run` 內部會強制設定 `DRY_RUN=true`，不會真的推播 LINE 訊息。若要測試真實推播，請直接執行 `npm run report`（需確保 `.env` 中 `LINE_TARGETS` 已填入正確 ID）。
+> **注意**：
+> - `npm run dry-run` 內部會強制設定 `DRY_RUN=true`，不會真的推播 LINE 訊息
+> - `report` CLI 目前執行的是 monthly close orchestration；真正唯讀的月報動作請使用 `report-only`
+> - `backfill` 的 dry-run 與正式執行使用不同 `jobId`，不會互相阻塞
 
 ---
 
@@ -671,6 +714,17 @@ aws dynamodb query \
   --expression-attribute-values '{":mk":{"S":"2026-01"},":t":{"BOOL":true}}'
 ```
 
+### 查詢 official final
+
+```bash
+aws dynamodb query \
+  --table-name usage_snapshots \
+  --key-condition-expression "monthKey = :mk" \
+  --filter-expression "#source = :src AND isOfficialFinal = :t" \
+  --expression-attribute-names '{"#source":"source"}' \
+  --expression-attribute-values '{":mk":{"S":"2026-03"},":src":{"S":"historical_backfill"},":t":{"BOOL":true}}'
+```
+
 ### 查詢 job_runs 執行紀錄
 
 ```bash
@@ -684,7 +738,11 @@ aws dynamodb get-item \
 ## 注意事項
 
 - LINE consumption API 回傳的 `totalUsage` 為**近似值**，最終帳單請以 LINE OA Manager 後台為準
-- `isPrevMonthFinal` 快照一旦標記，建議不要手動修改（影響回報計算）
+- `isPrevMonthFinal` 為舊版跨月封存欄位；正式月報改以 `historical_backfill + isOfficialFinal=true` 為準
+- 若指定月份任一天 LINE insight 回傳 `unready`，該次 backfill 不會標記 `isOfficialFinal`
+- `backfill` 目前採 staged build + promote 策略；新 build 全數寫入成功後，才會原子切換 official final
+- `backfill` 成功 promote 後會清理舊 staged build；失敗時也會清理當次 build 已寫入的殘留 rows
+- `monthly close` 遇到同月份 backfill 已在執行時，會按月份大小與 LINE API timeout/retry 預算等待，不再固定只等 30 秒
 - `cdk destroy` 不會刪除 DynamoDB 資料表（`RemovalPolicy.RETAIN`），請手動清理
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
 - 正式環境若需重新部署，請至少確認 `.env` 內 `IMAGE_TAG` 已設定；若要收到通知，再補 `ALARM_EMAIL` / `DEBUG_EMAIL`

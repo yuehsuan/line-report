@@ -1,6 +1,7 @@
 import { DateTime } from 'luxon';
 
 const TAIPEI_TZ = 'Asia/Taipei';
+const TOKYO_TZ = 'Asia/Tokyo';
 
 /**
  * 取得目前台北時間的 DateTime 物件
@@ -52,4 +53,71 @@ export function toUtcIso(dt) {
  */
 export function fromUtcIso(isoStr) {
   return DateTime.fromISO(isoStr, { zone: 'utc' });
+}
+
+/**
+ * 取得指定月份的所有日期字串（YYYY-MM-DD），以指定時區計算。
+ * @param {string} monthKey
+ * @param {string} [zone=TAIPEI_TZ]
+ * @returns {string[]}
+ */
+export function getMonthDates(monthKey, zone = TAIPEI_TZ) {
+  const start = DateTime.fromFormat(monthKey, 'yyyy-MM', { zone }).startOf('month');
+  if (!start.isValid) {
+    throw new Error(`無效的 monthKey: ${monthKey}`);
+  }
+
+  const days = [];
+  let cursor = start;
+  const end = start.endOf('month').startOf('day');
+  while (cursor <= end) {
+    days.push(cursor.toFormat('yyyy-MM-dd'));
+    cursor = cursor.plus({ days: 1 });
+  }
+  return days;
+}
+
+/**
+ * 將 YYYY-MM-DD 轉為 LINE insight API 所需的 yyyyMMdd（UTC+9 / Tokyo）
+ * @param {string} dateKey
+ * @returns {string}
+ */
+export function toLineInsightDate(dateKey) {
+  const dt = DateTime.fromFormat(dateKey, 'yyyy-MM-dd', { zone: TOKYO_TZ });
+  if (!dt.isValid) {
+    throw new Error(`無效的 dateKey: ${dateKey}`);
+  }
+  return dt.toFormat('yyyyMMdd');
+}
+
+/**
+ * 取得台北時間某日結束前的時間點，並轉為 UTC ISO，用於回補寫入 snapshot ts。
+ * @param {string} dateKey
+ * @returns {string}
+ */
+export function getBackfillTs(dateKey) {
+  const dt = DateTime.fromFormat(dateKey, 'yyyy-MM-dd', { zone: TAIPEI_TZ })
+    .set({ hour: 23, minute: 58, second: 0, millisecond: 0 });
+  if (!dt.isValid) {
+    throw new Error(`無效的 dateKey: ${dateKey}`);
+  }
+  return dt.toUTC().toISO();
+}
+
+/**
+ * 取得 live snapshot 的寫入時間，避開 historical_backfill 保留的 23:58:00 slot。
+ * @param {DateTime} dt
+ * @returns {string}
+ */
+export function getLiveSnapshotTs(dt) {
+  const adjusted = dt.setZone(TAIPEI_TZ);
+  const safeDt = (
+    adjusted.hour === 23
+    && adjusted.minute === 58
+    && adjusted.second === 0
+    && adjusted.millisecond === 0
+  )
+    ? adjusted.plus({ seconds: 1 })
+    : adjusted;
+  return toUtcIso(safeDt);
 }

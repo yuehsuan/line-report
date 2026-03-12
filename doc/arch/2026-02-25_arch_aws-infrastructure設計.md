@@ -14,8 +14,9 @@ EventBridge Scheduler
   │                                    ├── DynamoDB PutItem (usage_snapshots)
   │                                    └── DynamoDB PutItem (job_runs)
   │
-  └── 每月 11 日 09:00 Asia/Taipei  ──→  ECS Fargate (report task)
-                                          ├── DynamoDB Query (prevMonthFinal)
+  └── 每月 11 日 09:00 Asia/Taipei  ──→  ECS Fargate (monthly close task)
+                                          ├── 確保 historical_backfill official final 已存在
+                                          ├── DynamoDB Query (official final)
                                           ├── calculateFee()
                                           └── POST LINE /message/push
 
@@ -35,7 +36,7 @@ CloudWatch Alarm + SNS              ──→  Error alert
 | `LineReportSsmStack` | SSM Parameters | LINE token、群組 ID、計費設定 |
 | `LineReportMonitoringStack` | CloudWatch Alarm + SNS | 錯誤告警 |
 | `LineReportEcsStack` | ECS Cluster + Task Definition | Fargate 容器設定，image tag 由 `--context imageTag` 注入 |
-| `LineReportSchedulerStack` | EventBridge Scheduler × 2 | snapshot / report cron 排程 |
+| `LineReportSchedulerStack` | EventBridge Scheduler × 2 | snapshot / monthly close cron 排程 |
 
 ### 部署順序
 

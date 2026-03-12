@@ -34,7 +34,7 @@ let axiosPostCalls = [];
 let mockAxiosGet = async () => ({ data: { totalUsage: 123 } });
 let mockAxiosPost = async () => ({ headers: { 'x-line-request-id': 'req-1' } });
 
-const { getConsumption, pushMessage } = await esmock('../lib/lineApi.js', {
+const { getConsumption, getDailyDelivery, pushMessage } = await esmock('../lib/lineApi.js', {
   axios: {
     default: {
       get: async (...args) => {
@@ -141,5 +141,56 @@ describe('pushMessage', () => {
       /HTTP 503, requestId=req-503/,
     );
     assert.equal(axiosPostCalls.length, 3);
+  });
+});
+
+describe('getDailyDelivery', () => {
+  test('應把 OA Manager 與 targeting/narrowcast 欄位納入 totalUsage', async () => {
+    mockAxiosGet = async () => ({
+      data: {
+        status: 'ready',
+        broadcast: 10,
+        targeting: 20,
+        narrowcast: 30,
+        apiBroadcast: 1,
+        apiPush: 2,
+        apiMulticast: 3,
+        apiNarrowcast: 4,
+        apiReply: 5,
+        autoResponse: 6,
+        welcomeResponse: 7,
+        chat: 8,
+      },
+    });
+
+    const result = await getDailyDelivery('20260331');
+
+    assert.equal(result.totalUsage, 96);
+    assert.equal(result.breakdown.broadcast, 10);
+    assert.equal(result.breakdown.targeting, 20);
+    assert.equal(result.breakdown.narrowcast, 30);
+  });
+
+  test('未提供 OA Manager 欄位時應維持既有加總結果', async () => {
+    mockAxiosGet = async () => ({
+      data: {
+        status: 'ready',
+        apiBroadcast: 1,
+        apiPush: 2,
+        apiMulticast: 3,
+        apiNarrowcast: 4,
+        apiReply: 5,
+        autoResponse: 6,
+        welcomeResponse: 7,
+        chat: 8,
+      },
+    });
+
+    const result = await getDailyDelivery('20260330');
+
+    assert.equal(result.totalUsage, 36);
+    assert.equal(result.breakdown.broadcast, 0);
+    assert.equal(result.breakdown.targeting, 0);
+    assert.equal(result.breakdown.narrowcast, 0);
   });
 });
