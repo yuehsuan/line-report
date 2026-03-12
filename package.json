@@ -7,9 +7,11 @@
   "scripts": {
     "start": "node src/index.js",
     "snapshot": "node --env-file=.env src/index.js snapshot",
+    "backfill": "node --env-file=.env src/index.js backfill",
     "report": "node --env-file=.env src/index.js report --month=prev",
     "test": "node --test src/unit-tests/**/*.test.js",
     "test:all": "npm test && cd iac && npm test",
+    "test:backfill": "node --test src/unit-tests/backfill.test.js",
     "test:pricing": "node --test src/unit-tests/pricing.test.js",
     "test:date": "node --test src/unit-tests/date.test.js",
     "test:storage": "node --test src/unit-tests/storage.test.js",

@@ -131,6 +131,57 @@ export async function getConsumption() {
 }
 
 /**
+ * 取得指定日期的 LINE daily delivery insight。
+ * GET /v2/bot/insight/message/delivery?date=yyyyMMdd
+ * @param {string} date YYYYMMDD
+ * @returns {Promise<{
+ *   status: string,
+ *   date: string,
+ *   totalUsage: number,
+ *   breakdown: Record<string, number>,
+ *   raw: Object,
+ * }>}
+ */
+export async function getDailyDelivery(date) {
+  const url = `${BASE_URL.replace('/message', '')}/insight/message/delivery?date=${date}`;
+  const keys = [
+    'broadcast',
+    'targeting',
+    'narrowcast',
+    'apiBroadcast',
+    'apiPush',
+    'apiMulticast',
+    'apiNarrowcast',
+    'apiReply',
+    'autoResponse',
+    'welcomeResponse',
+    'chat',
+  ];
+
+  const { data } = await requestWithRetry(`getDailyDelivery:${date}`, () =>
+    axios.get(url, getRequestConfig()),
+  );
+
+  const breakdown = Object.fromEntries(
+    keys.map((key) => [key, Number.isFinite(data[key]) ? data[key] : 0]),
+  );
+  const totalUsage = Object.values(breakdown).reduce((sum, value) => sum + value, 0);
+  const raw = {
+    date,
+    status: data.status || 'ready',
+    totalUsage,
+    breakdown,
+  };
+  return {
+    status: raw.status,
+    date,
+    totalUsage,
+    breakdown,
+    raw,
+  };
+}
+
+/**
  * 推播文字訊息到指定 LINE 群組或使用者
  * POST /v2/bot/message/push
  * @param {string} to  群組 ID 或使用者 ID
@@ -141,7 +192,7 @@ export async function pushMessage(to, text) {
   if (!to) throw new Error('pushMessage: to 參數不得為空');
 
   if (process.env.DRY_RUN === 'true') {
-    log.info({ to, text }, '[DRY_RUN] 跳過 LINE push，訊息內容如上');
+    log.info({ targetType: to[0] || 'N/A', textLength: text.length }, '[DRY_RUN] 跳過 LINE push');
     return;
   }
 

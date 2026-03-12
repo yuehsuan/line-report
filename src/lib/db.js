@@ -5,6 +5,8 @@ import {
   GetCommand,
   QueryCommand,
   UpdateCommand,
+  DeleteCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { createLogger } from './logger.js';
 
@@ -91,5 +93,28 @@ export async function dbUpdate(tableName, key, params) {
   const client = getDocumentClient();
   const cmd = new UpdateCommand({ TableName: tableName, Key: key, ...params });
   log.debug({ tableName, key }, 'dbUpdate');
+  return client.send(cmd);
+}
+
+/**
+ * DeleteItem
+ * @param {string} tableName
+ * @param {Object} key
+ */
+export async function dbDelete(tableName, key) {
+  const client = getDocumentClient();
+  const cmd = new DeleteCommand({ TableName: tableName, Key: key });
+  log.debug({ tableName, key }, 'dbDelete');
+  return client.send(cmd);
+}
+
+/**
+ * TransactWriteItems
+ * @param {Array} transactItems
+ */
+export async function dbTransactWrite(transactItems) {
+  const client = getDocumentClient();
+  const cmd = new TransactWriteCommand({ TransactItems: transactItems });
+  log.debug({ items: transactItems.length }, 'dbTransactWrite');
   return client.send(cmd);
 }

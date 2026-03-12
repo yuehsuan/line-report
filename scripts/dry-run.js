@@ -18,7 +18,8 @@
  *   3. 執行：
  *      node scripts/dry-run.js
  *      node scripts/dry-run.js --step=snapshot   # 只跑快照
- *      node scripts/dry-run.js --step=report     # 只跑回報
+ *      node scripts/dry-run.js --step=backfill   # 只跑回補
+ *      node scripts/dry-run.js --step=report     # 只跑 monthly close dry-run
  *      node scripts/dry-run.js --inspect         # 顯示 DB 內容
  */
 
@@ -30,12 +31,11 @@ import {
 import {
   DynamoDBDocumentClient,
   ScanCommand,
-  PutCommand,
-  QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 
 import { runSnapshot } from '../src/actions/snapshot.js';
-import { runReport } from '../src/actions/report.js';
+import { runBackfill } from '../src/actions/backfill.js';
+import { runMonthlyClose } from '../src/actions/monthlyClose.js';
 import { getNowTaipei, getMonthKey, getPrevMonthKey } from '../src/lib/date.js';
 
 // 解析 CLI 參數
@@ -94,45 +94,6 @@ async function ensureTables() {
   }
 }
 
-/**
- * 為 report 步驟預先植入上月 prevMonthFinal 假快照。
- * 僅在該月份尚無 isPrevMonthFinal=true 的資料時才寫入，確保冪等。
- */
-async function seedPrevMonthData(prevMonthKey) {
-  const snapshotsTable = process.env.DDB_TABLE_SNAPSHOTS || 'usage_snapshots';
-
-  // 檢查是否已有 prevMonthFinal
-  const existing = await docClient.send(new QueryCommand({
-    TableName: snapshotsTable,
-    KeyConditionExpression: 'monthKey = :mk',
-    FilterExpression: 'isPrevMonthFinal = :t',
-    ExpressionAttributeValues: { ':mk': prevMonthKey, ':t': true },
-  }));
-
-  if (existing.Items?.length > 0) {
-    console.log(`[dry-run] 上月 ${prevMonthKey} prevMonthFinal 已存在，略過 seed`);
-    return;
-  }
-
-  // 植入假的上月最終快照（月底 23:55 台北時間）
-  const [year, month] = prevMonthKey.split('-').map(Number);
-  const lastDayTs = new Date(Date.UTC(year, month, 0, 15, 55, 0)).toISOString();
-
-  await docClient.send(new PutCommand({
-    TableName: snapshotsTable,
-    Item: {
-      monthKey: prevMonthKey,
-      ts: lastDayTs,
-      totalUsage: 8000,
-      rawJson: JSON.stringify({ totalUsage: 8000 }),
-      isPrevMonthFinal: true,
-      createdAt: new Date().toISOString(),
-    },
-  }));
-
-  console.log(`[dry-run] seed：已植入 ${prevMonthKey} prevMonthFinal 假快照（totalUsage=8000）`);
-}
-
 async function inspectDb() {
   const snapshotsTable = process.env.DDB_TABLE_SNAPSHOTS || 'usage_snapshots';
   const runsTable = process.env.DDB_TABLE_RUNS || 'job_runs';
@@ -142,7 +103,7 @@ async function inspectDb() {
   if (snapshots.Items?.length) {
     snapshots.Items.forEach((item) => {
       console.log(
-        `  ${item.monthKey} | ${item.ts} | totalUsage=${item.totalUsage} | isPrevMonthFinal=${item.isPrevMonthFinal}`
+        `  ${item.monthKey} | ${item.ts} | totalUsage=${item.totalUsage} | source=${item.source || 'live_snapshot'} | isOfficialFinal=${item.isOfficialFinal || false} | isPrevMonthFinal=${item.isPrevMonthFinal}`
       );
     });
   } else {
@@ -184,13 +145,16 @@ async function main() {
     console.log('[dry-run] snapshot 完成');
   }
 
-  if (!stepArg || stepArg === 'report') {
-    // 確保上月有 prevMonthFinal 資料，使 report 步驟在空白 DB 也能完整執行
+  if (stepArg === 'backfill') {
     const prevMonthKey = getPrevMonthKey(now);
-    await seedPrevMonthData(prevMonthKey);
+    console.log('\n[dry-run] ── 執行 backfill ─────────────────────────');
+    await runBackfill({ month: prevMonthKey, dryRun: true });
+    console.log('[dry-run] backfill 完成（DRY_RUN）');
+  }
 
+  if (!stepArg || stepArg === 'report') {
     console.log('\n[dry-run] ── 執行 report ───────────────────────────');
-    await runReport({ month: 'prev' });
+    await runMonthlyClose({ month: 'prev', dryRun: true });
     console.log('[dry-run] report 完成');
   }
 

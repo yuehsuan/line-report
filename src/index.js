@@ -1,5 +1,7 @@
 import { runSnapshot } from './actions/snapshot.js';
 import { runReport } from './actions/report.js';
+import { runBackfill } from './actions/backfill.js';
+import { runMonthlyClose } from './actions/monthlyClose.js';
 import logger from './lib/logger.js';
 
 const [, , action, ...rest] = process.argv;
@@ -29,18 +31,27 @@ function parseArgs(args) {
 
 async function main() {
   if (!action) {
-    logger.error('用法: node src/index.js <snapshot|report> [--month=prev|YYYY-MM]');
+    logger.error('用法: node src/index.js <snapshot|backfill|report|report-only> [--month=prev|YYYY-MM] [--rebuild=true]');
     process.exit(1);
   }
 
   const args = parseArgs(rest);
+  const dryRun = args['dry-run'] === undefined ? undefined : args['dry-run'] === 'true';
 
   if (action === 'snapshot') {
     await runSnapshot();
+  } else if (action === 'backfill') {
+    await runBackfill({
+      month: args.month,
+      dryRun,
+      rebuild: args.rebuild === 'true',
+    });
   } else if (action === 'report') {
-    await runReport({ month: args.month || 'prev' });
+    await runMonthlyClose({ month: args.month || 'prev', dryRun });
+  } else if (action === 'report-only') {
+    await runReport({ month: args.month || 'prev', dryRun });
   } else {
-    logger.error({ action }, `未知的 action: ${action}，支援：snapshot, report`);
+    logger.error({ action }, `未知的 action: ${action}，支援：snapshot, backfill, report, report-only；backfill 若要覆寫既有 official final 請加 --rebuild=true`);
     process.exit(1);
   }
 }

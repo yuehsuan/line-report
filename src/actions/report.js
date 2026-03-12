@@ -1,5 +1,5 @@
 import { getNowTaipei, getPrevMonthKey } from '../lib/date.js';
-import { claimJobRun, getJobRun, getPrevMonthFinalSnapshot, upsertJobRun } from '../lib/storage.js';
+import { claimJobRun, getJobRun, getOfficialFinalSnapshot, upsertJobRun } from '../lib/storage.js';
 import { calculateFee } from '../lib/pricing.js';
 import { pushMessage } from '../lib/lineApi.js';
 import { createLogger } from '../lib/logger.js';
@@ -10,8 +10,10 @@ const log = createLogger({ action: 'report' });
  * 執行每月回報
  * @param {Object} options
  * @param {string} [options.month]  "prev"（預設）或 "YYYY-MM"
+ * @param {boolean} [options.dryRun]
+ * @param {Object|null} [options.snapshotOverride]
  */
-export async function runReport({ month = 'prev' } = {}) {
+export async function runReport({ month = 'prev', dryRun = process.env.DRY_RUN === 'true', snapshotOverride = null } = {}) {
   const now = getNowTaipei();
 
   let targetMonthKey;
@@ -24,57 +26,58 @@ export async function runReport({ month = 'prev' } = {}) {
     process.exit(1);
   }
 
-  const jobId = `report#${targetMonthKey}`;
+  const jobId = dryRun ? `report-dry-run#${targetMonthKey}` : `report#${targetMonthKey}`;
   const startedAt = new Date().toISOString();
   const existingRun = await getJobRun(jobId);
 
-  if (existingRun?.status === 'success') {
-    log.info({ jobId, targetMonthKey }, '每月回報已成功送出，略過（idempotent）');
+  if (!dryRun && existingRun?.status === 'success') {
+    log.info({ jobId, targetMonthKey, dryRun }, '每月回報已成功送出，略過（idempotent）');
     return;
   }
 
   const attempts = (existingRun?.attempts || 0) + 1;
   const deliveredTargets = new Set(existingRun?.deliveredTargets || []);
 
-  log.info({ targetMonthKey }, '開始執行每月回報');
+  log.info({ targetMonthKey, dryRun }, '開始執行每月回報');
   const claimed = await claimJobRun(jobId, {
     status: 'running',
     attempts,
     startedAt,
     targetMonthKey,
     deliveredTargets: [...deliveredTargets],
-  }, { allowOverwriteStatuses: ['failed'] });
+  }, { allowOverwriteStatuses: dryRun ? ['failed', 'success'] : ['failed'] });
 
   if (!claimed) {
     const latestRun = await getJobRun(jobId);
-    if (latestRun?.status === 'success') {
-      log.info({ jobId, targetMonthKey }, '每月回報已成功送出，略過（idempotent）');
+    if (!dryRun && latestRun?.status === 'success') {
+      log.info({ jobId, targetMonthKey, dryRun }, '每月回報已成功送出，略過（idempotent）');
       return;
     }
     if (latestRun?.status === 'running') {
-      log.warn({ jobId, targetMonthKey }, '每月回報已有進行中的執行，略過重複觸發');
+      log.warn({ jobId, targetMonthKey, dryRun }, '每月回報已有進行中的執行，略過重複觸發');
       return;
     }
     throw new Error(`無法取得 ${jobId} 的執行權，請檢查 job_runs 狀態後再重試`);
   }
 
   try {
-    // 取得上月 prevMonthFinal 快照
-    const snapshot = await getPrevMonthFinalSnapshot(targetMonthKey);
+    // 取得正式月結快照（historical_backfill + isOfficialFinal=true）
+    const snapshot = snapshotOverride || await getOfficialFinalSnapshot(targetMonthKey);
     if (!snapshot) {
-      const errMsg = `找不到 ${targetMonthKey} 的 prevMonthFinal 快照，請確認快照排程是否正常執行，或手動補跑 snapshot`;
+      const errMsg = `找不到 ${targetMonthKey} 的 official final 快照`;
       log.error({ targetMonthKey }, errMsg);
       await upsertJobRun(jobId, {
         status: 'failed',
         startedAt,
         finishedAt: new Date().toISOString(),
+        dryRun,
         lastError: errMsg,
       });
       process.exit(1);
     }
 
     const { totalUsage } = snapshot;
-    log.info({ targetMonthKey, totalUsage, snapshotTs: snapshot.ts }, '取得 prevMonthFinal 快照');
+    log.info({ targetMonthKey, totalUsage, snapshotTs: snapshot.effectiveTs || snapshot.ts, dryRun }, '取得 official final 快照');
 
     // 計算加購費用與總費用
     const { additionalCount, feeRounded, planFee, totalFeeRounded } = calculateFee(totalUsage);
@@ -97,7 +100,7 @@ export async function runReport({ month = 'prev' } = {}) {
       currencySymbol,
     });
 
-    log.info({ message }, '準備推播訊息');
+    log.info({ targetMonthKey, dryRun, targetCountHint: (process.env.LINE_TARGETS || '').split(',').filter(Boolean).length }, '準備推播訊息');
 
     const targets = (process.env.LINE_TARGETS || '')
       .split(',')
@@ -113,7 +116,11 @@ export async function runReport({ month = 'prev' } = {}) {
         log.info({ jobId, target }, '此 target 已於前次嘗試送出，略過重送');
         continue;
       }
-      await pushMessage(target, message);
+      if (dryRun) {
+        log.info({ jobId, targetType: target[0] || 'N/A', textLength: message.length }, '[DRY_RUN] 跳過 LINE push');
+      } else {
+        await pushMessage(target, message);
+      }
       deliveredTargets.add(target);
       await upsertJobRun(jobId, {
         status: 'running',
@@ -121,6 +128,7 @@ export async function runReport({ month = 'prev' } = {}) {
         startedAt,
         targetMonthKey,
         deliveredTargets: [...deliveredTargets],
+        dryRun,
       });
     }
 
@@ -136,9 +144,10 @@ export async function runReport({ month = 'prev' } = {}) {
       feeRounded,
       planFee,
       totalFeeRounded,
+      dryRun,
     });
 
-    log.info({ jobId, targetMonthKey }, '每月回報執行完成');
+    log.info({ jobId, targetMonthKey, dryRun }, '每月回報執行完成');
   } catch (err) {
     const errMsg = err.message || String(err);
     log.error({ jobId, error: errMsg, stack: err.stack }, '每月回報執行失敗');
@@ -149,6 +158,7 @@ export async function runReport({ month = 'prev' } = {}) {
       finishedAt: new Date().toISOString(),
       targetMonthKey,
       deliveredTargets: [...deliveredTargets],
+      dryRun,
       lastError: errMsg,
     }).catch(() => {});
     process.exit(1);
@@ -169,19 +179,19 @@ export function buildReportMessage({
   currencySymbol,
 }) {
   const fmt = (n) => n.toLocaleString('zh-TW');
-  const lines = [
-    '【LINE 訊息用量回報】',
-    `期間：${periodDisplay}（${monthLabel}）`,
-    `總用量：${fmt(totalUsage)} 則（consumption 近似）`,
-    `加購訊息量：${fmt(additionalCount)} 則`,
-    `加購費用：${currencySymbol} ${fmt(feeRounded)}（依設定估算）`,
-  ];
+    const lines = [
+      '【LINE 訊息用量回報】',
+      `期間：${periodDisplay}（${monthLabel}）`,
+      `總用量：${fmt(totalUsage)} 則（historical backfill 月結）`,
+      `加購訊息量：${fmt(additionalCount)} 則`,
+      `加購費用：${currencySymbol} ${fmt(feeRounded)}（依設定估算）`,
+    ];
 
   if (planFee > 0) {
     lines.push(`方案費：${currencySymbol} ${fmt(planFee)}`);
     lines.push(`費用合計：${currencySymbol} ${fmt(totalFeeRounded)}（含稅前，依設定估算）`);
   }
 
-  lines.push('備註：用量含 OA Manager；consumption 為近似值，帳單以 OA Manager 後台為準。');
+  lines.push('備註：月報依 LINE daily delivery historical backfill 計算；帳單仍以 OA Manager 後台為準。');
   return lines.join('\n');
 }

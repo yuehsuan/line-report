@@ -155,3 +155,55 @@ When unsure, follow these defaults:
 - Do not use vague commit titles like `update`, `misc`, or `final`.
 - Do not use non-semantic version strings for formal releases.
 - Do not combine unrelated changes into one commit if they can be split clearly.
+
+## Issue Format
+
+When opening a follow-up issue, use this structure:
+
+```text
+## Why it matters
+<為什麼重要>
+
+## Current gap
+<目前缺口>
+
+## Suggested scope
+<建議範圍>
+
+## Out of scope for current patch
+這個議題已在本次 bugfix patch 中明確列為 follow-up，不納入此次修正。
+
+## Related
+- PR: #xxx
+- Commit: <commit sha or title>
+```
+
+Keep issue titles short and specific.
+
+## PR Format
+
+When opening a PR for this workflow, use this structure:
+
+```text
+## 背景
+本次修正 monthly close / backfill / report dry-run 相關的 correctness 與狀態一致性問題。
+
+## 本次修正範圍
+- ...
+
+## 不在本次範圍
+- ...
+
+## 測試
+- ...
+
+## Follow-up Issues
+- #xxx ...
+```
+
+PR content should:
+
+- describe the fixed behavior, not the implementation timeline
+- list explicit out-of-scope items
+- include exact test commands that were run
+- link all follow-up issues created from the patch

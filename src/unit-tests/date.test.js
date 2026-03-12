@@ -8,6 +8,8 @@ import {
   getDateKey,
   toUtcIso,
   fromUtcIso,
+  getBackfillTs,
+  getLiveSnapshotTs,
 } from '../lib/date.js';
 
 // ─────────────────────────────────────────────
@@ -118,5 +120,23 @@ describe('fromUtcIso', () => {
     assert.equal(dt.zoneName, 'UTC');
     assert.equal(dt.hour, 15);
     assert.equal(dt.minute, 55);
+  });
+});
+
+describe('getBackfillTs / getLiveSnapshotTs', () => {
+  test('backfill ts 應固定在台北 23:58', () => {
+    const iso = getBackfillTs('2026-03-31');
+    assert.equal(iso, '2026-03-31T15:58:00.000Z');
+  });
+
+  test('live snapshot 若碰到保留 slot，應避開 backfill ts', () => {
+    const dt = DateTime.fromObject(
+      { year: 2026, month: 3, day: 31, hour: 23, minute: 58, second: 0, millisecond: 0 },
+      { zone: 'Asia/Taipei' }
+    );
+    const liveIso = getLiveSnapshotTs(dt);
+    const backfillIso = getBackfillTs('2026-03-31');
+    assert.notEqual(liveIso, backfillIso);
+    assert.equal(liveIso, '2026-03-31T15:58:01.000Z');
   });
 });

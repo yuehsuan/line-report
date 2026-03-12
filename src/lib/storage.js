@@ -1,5 +1,5 @@
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { dbPut, dbGet, dbQuery, dbUpdate, TABLE_SNAPSHOTS, TABLE_RUNS } from './db.js';
+import { dbPut, dbGet, dbQuery, dbUpdate, dbDelete, dbTransactWrite, TABLE_SNAPSHOTS, TABLE_RUNS } from './db.js';
 import { createLogger } from './logger.js';
 
 const log = createLogger({ module: 'storage' });
@@ -23,6 +23,8 @@ export async function writeSnapshot({ monthKey, ts, totalUsage, rawJson }) {
     totalUsage,
     rawJson,
     isPrevMonthFinal: false,
+    isOfficialFinal: false,
+    source: 'live_snapshot',
     createdAt: new Date().toISOString(),
   };
 
@@ -55,6 +57,43 @@ export async function querySnapshots(monthKey, ascending = true) {
 }
 
 /**
+ * 查詢指定月份、來源的所有快照，依 ts 排序
+ * @param {string} monthKey
+ * @param {string} source
+ * @param {boolean} [ascending=true]
+ */
+export async function querySnapshotsBySource(monthKey, source, ascending = true) {
+  return dbQuery(TABLE_SNAPSHOTS(), {
+    KeyConditionExpression: 'monthKey = :mk',
+    FilterExpression: '#source = :source',
+    ExpressionAttributeNames: { '#source': 'source' },
+    ExpressionAttributeValues: { ':mk': monthKey, ':source': source },
+    ScanIndexForward: ascending,
+  });
+}
+
+/**
+ * 查詢指定月份、來源、buildId 的快照
+ * @param {string} monthKey
+ * @param {string} source
+ * @param {string} backfillBuildId
+ * @param {boolean} [ascending=true]
+ */
+export async function querySnapshotsByBuild(monthKey, source, backfillBuildId, ascending = true) {
+  return dbQuery(TABLE_SNAPSHOTS(), {
+    KeyConditionExpression: 'monthKey = :mk',
+    FilterExpression: '#source = :source AND backfillBuildId = :buildId',
+    ExpressionAttributeNames: { '#source': 'source' },
+    ExpressionAttributeValues: {
+      ':mk': monthKey,
+      ':source': source,
+      ':buildId': backfillBuildId,
+    },
+    ScanIndexForward: ascending,
+  });
+}
+
+/**
  * 取得指定月份 isPrevMonthFinal=true 的最終快照
  * @param {string} monthKey
  * @returns {Object|null}
@@ -67,6 +106,47 @@ export async function getPrevMonthFinalSnapshot(monthKey) {
   });
   if (items.length === 0) return null;
   return items[items.length - 1];
+}
+
+/**
+ * 取得指定月份正式月結快照（historical_backfill + isOfficialFinal=true）
+ * @param {string} monthKey
+ * @returns {Object|null}
+ */
+export async function getOfficialFinalSnapshot(monthKey) {
+  const items = await dbQuery(TABLE_SNAPSHOTS(), {
+    KeyConditionExpression: 'monthKey = :mk',
+    FilterExpression: '#source = :source AND isOfficialFinal = :t',
+    ExpressionAttributeNames: { '#source': 'source' },
+    ExpressionAttributeValues: {
+      ':mk': monthKey,
+      ':source': 'historical_backfill',
+      ':t': true,
+    },
+  });
+  if (items.length === 0) return null;
+  if (items.length > 1) {
+    throw new Error(`${monthKey} 存在多筆 official final，請先修復 historical_backfill 資料`);
+  }
+  return items[items.length - 1];
+}
+
+/**
+ * 取得指定月份所有 official final 快照
+ * @param {string} monthKey
+ * @returns {Promise<Object[]>}
+ */
+export async function getOfficialFinalSnapshots(monthKey) {
+  return dbQuery(TABLE_SNAPSHOTS(), {
+    KeyConditionExpression: 'monthKey = :mk',
+    FilterExpression: '#source = :source AND isOfficialFinal = :t',
+    ExpressionAttributeNames: { '#source': 'source' },
+    ExpressionAttributeValues: {
+      ':mk': monthKey,
+      ':source': 'historical_backfill',
+      ':t': true,
+    },
+  });
 }
 
 /**
@@ -94,6 +174,152 @@ export async function markPrevMonthFinal(prevMonthKey) {
   });
   log.info({ prevMonthKey, ts: lastItem.ts, totalUsage: lastItem.totalUsage }, '已標記 prevMonthFinal');
   return { ...lastItem, isPrevMonthFinal: true };
+}
+
+/**
+ * 寫入 historical_backfill 快照，允許同月多日資料重建。
+ * @param {Object} params
+ * @param {string} params.monthKey
+ * @param {string} params.ts
+ * @param {number} params.totalUsage
+ * @param {string} params.rawJson
+ * @param {string} params.sourceDate
+ * @param {boolean} [params.isOfficialFinal=false]
+ */
+export async function writeBackfillSnapshot({
+  monthKey,
+  ts,
+  effectiveTs,
+  totalUsage,
+  rawJson,
+  sourceDate,
+  backfillBuildId,
+  isOfficialFinal = false,
+}) {
+  const item = {
+    monthKey,
+    ts,
+    effectiveTs,
+    totalUsage,
+    rawJson,
+    source: 'historical_backfill',
+    sourceDate,
+    backfillBuildId,
+    isPrevMonthFinal: false,
+    isOfficialFinal,
+    createdAt: new Date().toISOString(),
+  };
+
+  try {
+    await dbPut(TABLE_SNAPSHOTS(), item, {
+      ConditionExpression:
+        'attribute_not_exists(monthKey) AND attribute_not_exists(ts)',
+    });
+    log.info({ monthKey, ts, totalUsage, sourceDate, isOfficialFinal }, 'historical_backfill 寫入成功');
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException || err.name === 'ConditionalCheckFailedException') {
+      log.warn({ monthKey, ts, sourceDate }, 'historical_backfill 已存在，略過（idempotent）');
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * 產生 historical_backfill row 的實際 sort key
+ * @param {string} effectiveTs
+ * @param {string} backfillBuildId
+ * @returns {string}
+ */
+export function getBackfillStorageTs(effectiveTs, backfillBuildId) {
+  return `${effectiveTs}#historical_backfill#${backfillBuildId}`;
+}
+
+/**
+ * 原子切換 official final：保留舊資料直到新 build 完整 staged。
+ * @param {string} monthKey
+ * @param {string} backfillBuildId
+ * @returns {Promise<Object>}
+ */
+export async function promoteBackfillBuild(monthKey, backfillBuildId) {
+  const buildItems = await querySnapshotsByBuild(monthKey, 'historical_backfill', backfillBuildId, true);
+  if (buildItems.length === 0) {
+    throw new Error(`${monthKey} 找不到 buildId=${backfillBuildId} 的 staged backfill`);
+  }
+
+  const currentOfficials = await getOfficialFinalSnapshots(monthKey);
+  const newFinal = buildItems[buildItems.length - 1];
+
+  const transactItems = [
+    ...currentOfficials.map((item) => ({
+      Update: {
+        TableName: TABLE_SNAPSHOTS(),
+        Key: { monthKey: item.monthKey, ts: item.ts },
+        UpdateExpression: 'SET isOfficialFinal = :f',
+        ExpressionAttributeValues: { ':f': false },
+      },
+    })),
+    {
+      Update: {
+        TableName: TABLE_SNAPSHOTS(),
+        Key: { monthKey: newFinal.monthKey, ts: newFinal.ts },
+        UpdateExpression: 'SET isOfficialFinal = :t',
+        ExpressionAttributeValues: { ':t': true },
+      },
+    },
+  ];
+
+  await dbTransactWrite(transactItems);
+  log.info({ monthKey, backfillBuildId, promotedTs: newFinal.ts }, '已切換 official final');
+  return { ...newFinal, isOfficialFinal: true };
+}
+
+/**
+ * 刪除指定月份、來源的所有快照
+ * @param {string} monthKey
+ * @param {string} source
+ * @returns {Promise<number>}
+ */
+export async function deleteSnapshotsBySource(monthKey, source) {
+  const items = await querySnapshotsBySource(monthKey, source, true);
+  for (const item of items) {
+    await dbDelete(TABLE_SNAPSHOTS(), { monthKey: item.monthKey, ts: item.ts });
+  }
+  log.info({ monthKey, source, count: items.length }, '已刪除指定來源快照');
+  return items.length;
+}
+
+/**
+ * 刪除指定月份、來源、buildId 的所有快照
+ * @param {string} monthKey
+ * @param {string} source
+ * @param {string} backfillBuildId
+ * @returns {Promise<number>}
+ */
+export async function deleteSnapshotsByBuild(monthKey, source, backfillBuildId) {
+  const items = await querySnapshotsByBuild(monthKey, source, backfillBuildId, true);
+  for (const item of items) {
+    await dbDelete(TABLE_SNAPSHOTS(), { monthKey: item.monthKey, ts: item.ts });
+  }
+  log.info({ monthKey, source, backfillBuildId, count: items.length }, '已刪除指定 build 快照');
+  return items.length;
+}
+
+/**
+ * 刪除指定月份 historical_backfill 中，不在保留清單內的 build。
+ * @param {string} monthKey
+ * @param {string[]} keepBuildIds
+ * @returns {Promise<number>}
+ */
+export async function deleteHistoricalBackfillBuildsExcept(monthKey, keepBuildIds = []) {
+  const items = await querySnapshotsBySource(monthKey, 'historical_backfill', true);
+  const keepSet = new Set(keepBuildIds.filter(Boolean));
+  const deletions = items.filter((item) => !keepSet.has(item.backfillBuildId));
+  for (const item of deletions) {
+    await dbDelete(TABLE_SNAPSHOTS(), { monthKey: item.monthKey, ts: item.ts });
+  }
+  log.info({ monthKey, keepBuildIds: [...keepSet], deletedCount: deletions.length }, '已清理舊 historical_backfill build');
+  return deletions.length;
 }
 
 // ─────────────────────────────────────────────
