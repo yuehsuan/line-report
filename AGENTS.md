@@ -83,7 +83,7 @@ Agents should interpret the aliases below as references to the corresponding rol
 - spec: 範疇寶寶 / 範疇小天使 / 需求寶寶 / 需求小天使 / spec agent / spec
 - ux: UX寶寶 / UX小天使 / 流程寶寶 / 流程小天使 / ux agent
 - design: 架構寶寶 / 架構小天使 / 架構分析師 / design agent
-- build: 工兵寶寶 / 工兵小天使 / 工兵 / 苦命勞工 / 苦命鬼 / build agent
+- build: 工兵寶寶 / 實作小天使 / 工兵 / 苦命勞工 / 苦命鬼 / build / build agent
 - qa: 驗收寶寶 / 驗收小天使 / 測試寶寶 / 測試小天使 / 測試小猴 / 小猴子 / qa agent
 - integrity: 一致性寶寶 / 一致性小天使 / 一致性巨人 / 巨人 / 流程巨人 / integrity agent / workflow agent
 - security: 資安寶寶 / 資安小天使 / security agent
