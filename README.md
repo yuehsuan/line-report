@@ -139,9 +139,21 @@ line-report/
 ├── .github/workflows/
 │   └── deploy.yml            # GitHub Actions CI/CD
 ├── doc/                      # 需求規劃、架構圖、ADR、Runbook
+│   └── plan/                 # private Git submodule：design / review / decision docs
 ├── Dockerfile
 └── .env.example
 ```
+
+---
+
+## 文件子模組說明
+
+- `doc/plan/` 是 private Git submodule
+- 用來放 design / review / decision docs
+- 不屬於 runtime dependency，不影響應用程式執行或部署時的必要依賴
+- 若要更新 `doc/plan/`：
+  - 先進入 submodule 完成 commit / push
+  - 再回主 repo 更新 submodule pointer
 
 ---
 
