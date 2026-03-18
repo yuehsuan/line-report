@@ -25,6 +25,8 @@ Focus on whether the system's persisted state, workflow state, and downstream be
 - integrity
 - integrity agent
 - workflow agent
+- i寶
+- 小i
 
 ## Direct invocation examples
 - 請一致性巨人檢查 workflow
