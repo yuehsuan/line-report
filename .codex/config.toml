@@ -44,3 +44,7 @@ config_file = ".codex/roles/perf.md"
 [agents.ops]
 description = "Observability and operations agent for logging, metrics, alerts, runbooks, deployment readiness, and operational blind spots."
 config_file = ".codex/roles/ops.md"
+
+[agents.Constraint]
+description = "Constraint and scope guard agent for scope boundaries, non-goals, acceptance criteria, trade-offs, and design gating."
+config_file = ".codex/roles/Constraint.md"
