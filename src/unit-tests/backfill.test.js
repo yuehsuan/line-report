@@ -14,7 +14,7 @@ import {
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 const originalEnv = {};
-const envKeys = ['DRY_RUN', 'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS'];
+const envKeys = ['DRY_RUN', 'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'PATCH_A_CUTOVER_MONTH'];
 
 before(() => {
   for (const k of envKeys) originalEnv[k] = process.env[k];
@@ -22,6 +22,7 @@ before(() => {
   process.env.AWS_ENDPOINT_URL = 'http://localhost:8000';
   process.env.DDB_TABLE_SNAPSHOTS = 'usage_snapshots';
   process.env.DDB_TABLE_RUNS = 'job_runs';
+  process.env.PATCH_A_CUTOVER_MONTH = '2026-01';
 });
 
 after(() => {

@@ -20,7 +20,7 @@ export interface EcsStackProps extends cdk.StackProps {
 export class EcsStack extends cdk.Stack {
   public readonly cluster: ecs.Cluster;
   public readonly snapshotTaskDefinition: ecs.FargateTaskDefinition;
-  public readonly reportTaskDefinition: ecs.FargateTaskDefinition;
+  public readonly monthlyCloseTaskDefinition: ecs.FargateTaskDefinition;
   public readonly taskSecurityGroup: ec2.SecurityGroup;
   public readonly taskSubnets: ec2.SubnetSelection;
 
@@ -180,9 +180,9 @@ export class EcsStack extends cdk.Stack {
       }),
     });
 
-    // ── Task Definition B：每月回報（command bake in，Scheduler 無需 override）
-    this.reportTaskDefinition = new ecs.FargateTaskDefinition(this, 'ReportTaskDefinition', {
-      family: 'line-report-report',
+    // ── Task Definition B：每月月結（command bake in，Scheduler 無需 override）
+    this.monthlyCloseTaskDefinition = new ecs.FargateTaskDefinition(this, 'MonthlyCloseTaskDefinition', {
+      family: 'line-report-monthly-close',
       cpu: 256,
       memoryLimitMiB: 512,
       executionRole,
@@ -193,12 +193,15 @@ export class EcsStack extends cdk.Stack {
       },
     });
 
-    this.reportTaskDefinition.addContainer('app', {
+    this.monthlyCloseTaskDefinition.addContainer('app', {
       containerName: 'app',
       image: ecs.ContainerImage.fromRegistry(imageUri),
       essential: true,
-      command: ['node', 'src/index.js', 'report', '--month=prev'],
-      environment: sharedEnv,
+      command: ['node', 'src/index.js', 'monthly-close-scheduled', '--month=prev'],
+      environment: {
+        ...sharedEnv,
+        MONTHLY_CLOSE_SCHEDULED: 'true',
+      },
       secrets: ssmSecrets,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'line-report',
@@ -217,7 +220,7 @@ export class EcsStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'ReportTaskDefinitionArn', {
-      value: this.reportTaskDefinition.taskDefinitionArn,
+      value: this.monthlyCloseTaskDefinition.taskDefinitionArn,
       exportName: 'LineReportReportTaskDefinitionArn',
     });
 

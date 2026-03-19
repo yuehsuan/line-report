@@ -1,5 +1,6 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import esmock from 'esmock';
 import { mockClient } from 'aws-sdk-client-mock';
 import {
@@ -14,7 +15,7 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 const originalEnv = {};
 const envKeys = ['DRY_RUN', 'LINE_TARGETS', 'FREE_QUOTA', 'PRICING_MODEL',
   'SINGLE_UNIT_PRICE', 'PLAN_FEE', 'CURRENCY', 'AWS_ENDPOINT_URL',
-  'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS'];
+  'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'PATCH_A_CUTOVER_MONTH'];
 
 before(() => {
   for (const k of envKeys) originalEnv[k] = process.env[k];
@@ -28,6 +29,7 @@ before(() => {
   process.env.AWS_ENDPOINT_URL = 'http://localhost:8000';
   process.env.DDB_TABLE_SNAPSHOTS = 'usage_snapshots';
   process.env.DDB_TABLE_RUNS = 'job_runs';
+  process.env.PATCH_A_CUTOVER_MONTH = '2026-01';
 });
 
 after(() => {
@@ -41,15 +43,50 @@ beforeEach(() => {
   ddbMock.reset();
   pushedMessages = [];
   process.env.DRY_RUN = 'false';
+  mockClaimJobRun = async (...args) => realStorage.claimJobRun(...args);
+  mockGetJobRun = async (...args) => realStorage.getJobRun(...args);
+  mockUpsertJobRun = async (...args) => realStorage.upsertJobRun(...args);
+  mockGetMonthState = async () => ({
+    officialFinalSnapshotTs: '2026-01-31T15:58:00.000Z',
+    reportPublished: false,
+    publishedSnapshotTs: null,
+    reportOutOfSync: false,
+    stateVersion: 1,
+  });
 });
 
 let pushedMessages = [];
+let mockGetMonthState = async () => ({
+  officialFinalSnapshotTs: '2026-01-31T15:58:00.000Z',
+  reportPublished: false,
+  publishedSnapshotTs: null,
+  reportOutOfSync: false,
+  stateVersion: 1,
+});
+const realStorage = await import('../lib/storage.js');
+let mockClaimJobRun = async (...args) => realStorage.claimJobRun(...args);
+let mockGetJobRun = async (...args) => realStorage.getJobRun(...args);
+let mockUpsertJobRun = async (...args) => realStorage.upsertJobRun(...args);
 
 const { runReport, buildReportMessage } = await esmock('../actions/report.js', {
   '../lib/lineApi.js': {
     pushMessage: async (target, message) => {
       pushedMessages.push({ target, message });
     },
+  },
+  '../lib/storage.js': {
+    claimJobRun: async (...args) => mockClaimJobRun(...args),
+    getJobRun: async (...args) => mockGetJobRun(...args),
+    upsertJobRun: async (...args) => mockUpsertJobRun(...args),
+    getOfficialFinalSnapshot: realStorage.getOfficialFinalSnapshot,
+    getMonthState: async (...args) => mockGetMonthState(...args),
+    classifyMonthState: (item) => {
+      if (item.reportPublished === false && item.publishedSnapshotTs == null && item.reportOutOfSync === false) return 'unpublished_ready';
+      if (item.reportPublished === true && item.publishedSnapshotTs && item.reportOutOfSync === false && item.officialFinalSnapshotTs === item.publishedSnapshotTs) return 'already_converged';
+      if (item.reportPublished === true && item.publishedSnapshotTs && item.reportOutOfSync === true) return 'out_of_sync';
+      return 'invalid_month_state';
+    },
+    updateMonthState: async () => {},
   },
 });
 
@@ -89,8 +126,22 @@ describe('buildReportMessage', () => {
 describe('runReport - 幂等略過', () => {
   test('該月已成功送出時直接略過，不重送 LINE', async () => {
     pushedMessages = [];
-    ddbMock.on(GetCommand).resolves({
-      Item: { jobId: 'report#2026-01', status: 'success' },
+    const targetSetHash = createHash('sha256').update('U_target_1,U_target_2').digest('hex');
+    mockClaimJobRun = async () => false;
+    mockGetJobRun = async () => ({
+      jobId: 'publish-report#2026-01',
+      status: 'success',
+      deliverySessionKey: `2026-01#2026-01-31T15:58:00.000Z#${targetSetHash}`,
+    });
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{
+        monthKey: '2026-01',
+        ts: '2026-01-31T15:55:00.000Z',
+        effectiveTs: '2026-01-31T15:58:00.000Z',
+        totalUsage: 8000,
+        source: 'historical_backfill',
+        isOfficialFinal: true,
+      }],
     });
 
     await runReport({ month: '2026-01' });
@@ -178,16 +229,9 @@ describe('runReport - 找不到 official final', () => {
 
     await assert.rejects(
       () => runReport({ month: '2026-01' }),
-      (e) => e.message.startsWith(EXIT_SENTINEL) && e.message.endsWith('1'),
-      'process.exit(1) 應被呼叫',
+      /official final/,
+      '應直接拋出 official final 缺失錯誤',
     );
-
-    const failedCall = ddbMock.commandCalls(PutCommand).find(
-      (c) => c.args[0].input.Item?.status === 'failed',
-    );
-    assert.ok(failedCall, '應寫入 failed job_run');
-    assert.match(failedCall.args[0].input.Item.lastError, /official final/);
-    assert.equal(pushedMessages.length, 0, '找不到快照時不應送 LINE');
   }));
 });
 

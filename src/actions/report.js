@@ -1,173 +1,323 @@
-import { getNowTaipei, getPrevMonthKey } from '../lib/date.js';
-import { claimJobRun, getJobRun, getOfficialFinalSnapshot, upsertJobRun } from '../lib/storage.js';
+import { createHash } from 'node:crypto';
+import { compareMonthKey, getNowTaipei, getPrevMonthKey } from '../lib/date.js';
+import {
+  classifyMonthState,
+  claimJobRun,
+  getJobRun,
+  getMonthState,
+  getOfficialFinalSnapshot,
+  updateMonthState,
+  upsertJobRun,
+} from '../lib/storage.js';
 import { calculateFee } from '../lib/pricing.js';
 import { pushMessage } from '../lib/lineApi.js';
 import { createLogger } from '../lib/logger.js';
 
-const log = createLogger({ action: 'report' });
+const log = createLogger({ action: 'publish-report' });
 
-/**
- * 執行每月回報
- * @param {Object} options
- * @param {string} [options.month]  "prev"（預設）或 "YYYY-MM"
- * @param {boolean} [options.dryRun]
- * @param {Object|null} [options.snapshotOverride]
- */
-export async function runReport({ month = 'prev', dryRun = process.env.DRY_RUN === 'true', snapshotOverride = null } = {}) {
-  const now = getNowTaipei();
+const CUTOVER_ENV = 'PATCH_A_CUTOVER_MONTH';
+const STALE_MS = () => Number.parseInt(process.env.PUBLISH_RUN_STALE_AFTER_MS || '300000', 10);
 
-  let targetMonthKey;
-  if (month === 'prev') {
-    targetMonthKey = getPrevMonthKey(now);
-  } else if (/^\d{4}-\d{2}$/.test(month)) {
-    targetMonthKey = month;
-  } else {
-    log.error({ month }, '無效的 --month 參數，格式應為 "prev" 或 "YYYY-MM"');
-    process.exit(1);
+function getCutoverMonth() {
+  const value = process.env[CUTOVER_ENV];
+  if (!/^\d{4}-\d{2}$/.test(value || '')) {
+    throw new Error(`${CUTOVER_ENV} 未設定或格式錯誤`);
+  }
+  return value;
+}
+
+function resolveTargetMonth(month) {
+  if (month === 'prev' || !month) {
+    return getPrevMonthKey(getNowTaipei());
+  }
+  if (/^\d{4}-\d{2}$/.test(month)) return month;
+  throw new Error('無效的 --month 參數，格式應為 "prev" 或 "YYYY-MM"');
+}
+
+function getJobId(targetMonthKey, dryRun) {
+  return dryRun ? `report-dry-run#${targetMonthKey}` : `publish-report#${targetMonthKey}`;
+}
+
+function hashTargets(targets) {
+  return createHash('sha256').update(targets.join(',')).digest('hex');
+}
+
+function getTargets() {
+  const targets = (process.env.LINE_TARGETS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (targets.length === 0) throw new Error('環境變數 LINE_TARGETS 未設定');
+  return targets;
+}
+
+function buildDeliverySessionKey(targetMonthKey, snapshotTs, targetSetHash) {
+  return `${targetMonthKey}#${snapshotTs}#${targetSetHash}`;
+}
+
+function appendPreviousSession(existing, overrides = {}) {
+  const session = {
+    deliverySessionKey: existing.deliverySessionKey,
+    status: existing.status,
+    outcome: existing.outcome,
+    dispatchStartedAt: existing.dispatchStartedAt || null,
+    finishedAt: existing.finishedAt || null,
+    deliveredTargets: existing.deliveredTargets || [],
+    manualRecoveryDecision: existing.manualRecoveryDecision || null,
+    manualRecoveryConfirmedAt: existing.manualRecoveryConfirmedAt || null,
+    manualRecoveryConfirmedBy: existing.manualRecoveryConfirmedBy || null,
+    officialFinalSnapshotTs: existing.officialFinalSnapshotTs,
+    targetSetHash: existing.targetSetHash,
+    ...overrides,
+  };
+  return [...(existing.previousSessions || []), session];
+}
+
+async function failPublish(jobId, fields) {
+  await upsertJobRun(jobId, {
+    status: 'failed',
+    finishedAt: new Date().toISOString(),
+    ...fields,
+  });
+}
+
+async function handleUnknownDeliveryRecovery(existing, jobId, targetMonthKey, targets, observedSnapshotTs) {
+  const decision = existing.manualRecoveryDecision;
+
+  if (decision === 'confirm_delivered_then_finalize') {
+    const previousSessions = appendPreviousSession(existing);
+    await upsertJobRun(jobId, {
+      ...existing,
+      previousSessions,
+      status: 'running',
+    });
+
+    await updateMonthState(targetMonthKey, (current) => ({
+      reportPublished: true,
+      reportPublishedAt: new Date().toISOString(),
+      publishedSnapshotTs: observedSnapshotTs,
+      reportOutOfSync: false,
+      reportOutOfSyncSince: null,
+      reportOutOfSyncReason: null,
+    }));
+
+    await upsertJobRun(jobId, {
+      ...existing,
+      status: 'success',
+      outcome: 'published',
+      deliveredTargets: [...targets],
+      previousSessions,
+      manualRecoveryDecision: null,
+      manualRecoveryConfirmedAt: null,
+      manualRecoveryConfirmedBy: null,
+      finishedAt: new Date().toISOString(),
+    });
+    return { status: 'success', outcome: 'published', targetMonthKey };
   }
 
-  const jobId = dryRun ? `report-dry-run#${targetMonthKey}` : `report#${targetMonthKey}`;
+  if (decision === 'confirm_not_delivered_then_restart_publish') {
+    const previousSessions = appendPreviousSession(existing, {
+      outcome: 'publish_unknown_delivery_state',
+    });
+    return {
+      resetToNewSession: true,
+      previousSessions,
+    };
+  }
+
+  return {
+    status: 'failed',
+    outcome: 'publish_unknown_delivery_state',
+    targetMonthKey,
+  };
+}
+
+export async function runPublishReport({
+  month = 'prev',
+  confirmMonth,
+  dryRun = process.env.DRY_RUN === 'true',
+  snapshotOverride = null,
+  republish = false,
+  scheduled = false,
+} = {}) {
+  const targetMonthKey = resolveTargetMonth(month);
+  const cutoverMonth = getCutoverMonth();
+
+  if (compareMonthKey(targetMonthKey, cutoverMonth) < 0) {
+    throw new Error(`${targetMonthKey} 屬於 pre-cutover legacy month，請改走 legacy runbook`);
+  }
+  if (!scheduled && confirmMonth && confirmMonth !== targetMonthKey) {
+    throw new Error('publish-report 的 --confirm-month 必須等於 --month');
+  }
+
+  const snapshot = snapshotOverride || await getOfficialFinalSnapshot(targetMonthKey);
+  if (!snapshot) {
+    throw new Error(`找不到 ${targetMonthKey} 的 official final 快照`);
+  }
+
+  const monthState = await getMonthState(targetMonthKey);
+  const state = classifyMonthState(monthState);
+  if (state === 'invalid_month_state') {
+    throw new Error(`${targetMonthKey} month-state 非法，publish-report 中止`);
+  }
+  if (state === 'already_converged' && !republish) {
+    return { status: 'success', outcome: 'already_converged', targetMonthKey };
+  }
+  if (state === 'out_of_sync' && !republish) {
+    throw new Error(`${targetMonthKey} 為 out_of_sync，需顯式 --republish=true`);
+  }
+
+  const targets = getTargets();
+  const targetSetHash = hashTargets(targets);
+  const officialFinalSnapshotTs = snapshot.effectiveTs || snapshot.ts;
+  const deliverySessionKey = buildDeliverySessionKey(targetMonthKey, officialFinalSnapshotTs, targetSetHash);
+  const jobId = getJobId(targetMonthKey, dryRun);
+  const existing = await getJobRun(jobId);
+
+  if (existing?.status === 'running' && existing.deliverySessionKey === deliverySessionKey) {
+    const updatedAtMs = new Date(existing.updatedAt || existing.startedAt || 0).getTime();
+    const stale = Number.isFinite(updatedAtMs) && (Date.now() - updatedAtMs) > STALE_MS();
+    if (!stale) {
+      return { status: 'failed', outcome: 'publish_already_running', targetMonthKey };
+    }
+    if (existing.dispatchStartedAt) {
+      await failPublish(jobId, {
+        ...existing,
+        outcome: 'publish_unknown_delivery_state',
+        targetMonthKey,
+      });
+      return { status: 'failed', outcome: 'publish_unknown_delivery_state', targetMonthKey };
+    }
+  }
+
+  if (existing?.status === 'failed' && existing.deliverySessionKey === deliverySessionKey) {
+    if (existing.outcome === 'publish_unknown_delivery_state') {
+      const recovery = await handleUnknownDeliveryRecovery(existing, jobId, targetMonthKey, targets, officialFinalSnapshotTs);
+      if (!recovery?.resetToNewSession) {
+        return recovery;
+      }
+      await upsertJobRun(jobId, {
+        jobId,
+        status: 'running',
+        targetMonthKey,
+        deliverySessionKey,
+        officialFinalSnapshotTs,
+        deliveredTargets: [],
+        targetSetHash,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        dispatchStartedAt: null,
+        lastError: null,
+        previousSessions: recovery.previousSessions,
+        previousDeliverySessionKey: existing.deliverySessionKey,
+        outcome: null,
+      });
+    }
+  }
+
+  const deliveredTargets = new Set(existing?.deliveredTargets || []);
   const startedAt = new Date().toISOString();
-  const existingRun = await getJobRun(jobId);
-
-  if (!dryRun && existingRun?.status === 'success') {
-    log.info({ jobId, targetMonthKey, dryRun }, '每月回報已成功送出，略過（idempotent）');
-    return;
-  }
-
-  const attempts = (existingRun?.attempts || 0) + 1;
-  const deliveredTargets = new Set(existingRun?.deliveredTargets || []);
-
-  log.info({ targetMonthKey, dryRun }, '開始執行每月回報');
   const claimed = await claimJobRun(jobId, {
     status: 'running',
-    attempts,
-    startedAt,
     targetMonthKey,
+    deliverySessionKey,
+    officialFinalSnapshotTs,
     deliveredTargets: [...deliveredTargets],
+    targetSetHash,
+    dispatchStartedAt: null,
+    startedAt,
+    finishedAt: null,
+    lastError: null,
+    previousSessions: existing?.previousSessions || [],
+    previousDeliverySessionKey: existing?.previousDeliverySessionKey || null,
+    outcome: null,
   }, { allowOverwriteStatuses: dryRun ? ['failed', 'success'] : ['failed'] });
 
   if (!claimed) {
-    const latestRun = await getJobRun(jobId);
-    if (!dryRun && latestRun?.status === 'success') {
-      log.info({ jobId, targetMonthKey, dryRun }, '每月回報已成功送出，略過（idempotent）');
-      return;
+    const latest = await getJobRun(jobId);
+    if (latest?.status === 'success' && latest.deliverySessionKey === deliverySessionKey) {
+      return { status: 'success', outcome: 'already_converged', targetMonthKey };
     }
-    if (latestRun?.status === 'running') {
-      log.warn({ jobId, targetMonthKey, dryRun }, '每月回報已有進行中的執行，略過重複觸發');
-      return;
-    }
-    throw new Error(`無法取得 ${jobId} 的執行權，請檢查 job_runs 狀態後再重試`);
+    return { status: 'failed', outcome: 'publish_already_running', targetMonthKey };
   }
 
+  const [year, mm] = targetMonthKey.split('-');
+  const periodDisplay = `${year}/${mm}`;
+  const currency = process.env.CURRENCY || 'TWD';
+  const currencySymbol = currency === 'TWD' ? 'NT$' : currency;
+  const { additionalCount, feeRounded, planFee, totalFeeRounded } = calculateFee(snapshot.totalUsage);
+  const message = buildReportMessage({
+    periodDisplay,
+    monthLabel: month === 'prev' ? '前月' : '指定月份',
+    totalUsage: snapshot.totalUsage,
+    additionalCount,
+    feeRounded,
+    planFee,
+    totalFeeRounded,
+    currencySymbol,
+  });
+
   try {
-    // 取得正式月結快照（historical_backfill + isOfficialFinal=true）
-    const snapshot = snapshotOverride || await getOfficialFinalSnapshot(targetMonthKey);
-    if (!snapshot) {
-      const errMsg = `找不到 ${targetMonthKey} 的 official final 快照`;
-      log.error({ targetMonthKey }, errMsg);
-      await upsertJobRun(jobId, {
-        status: 'failed',
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        dryRun,
-        lastError: errMsg,
-      });
-      process.exit(1);
-    }
-
-    const { totalUsage } = snapshot;
-    log.info({ targetMonthKey, totalUsage, snapshotTs: snapshot.effectiveTs || snapshot.ts, dryRun }, '取得 official final 快照');
-
-    // 計算加購費用與總費用
-    const { additionalCount, feeRounded, planFee, totalFeeRounded } = calculateFee(totalUsage);
-    log.info({ additionalCount, feeRounded, planFee, totalFeeRounded }, '費用計算完成');
-
-    // 組成推播訊息
-    const [year, mm] = targetMonthKey.split('-');
-    const periodDisplay = `${year}/${mm}`;
-    const currency = process.env.CURRENCY || 'TWD';
-    const currencySymbol = currency === 'TWD' ? 'NT$' : currency;
-
-    const message = buildReportMessage({
-      periodDisplay,
-      monthLabel: month === 'prev' ? '前月' : '指定月份',
-      totalUsage,
-      additionalCount,
-      feeRounded,
-      planFee,
-      totalFeeRounded,
-      currencySymbol,
+    await upsertJobRun(jobId, {
+      ...(await getJobRun(jobId)),
+      dispatchStartedAt: new Date().toISOString(),
+      status: 'running',
     });
 
-    log.info({ targetMonthKey, dryRun, targetCountHint: (process.env.LINE_TARGETS || '').split(',').filter(Boolean).length }, '準備推播訊息');
-
-    const targets = (process.env.LINE_TARGETS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (targets.length === 0) {
-      throw new Error('環境變數 LINE_TARGETS 未設定');
-    }
-
     for (const target of targets) {
-      if (deliveredTargets.has(target)) {
-        log.info({ jobId, target }, '此 target 已於前次嘗試送出，略過重送');
-        continue;
-      }
-      if (dryRun) {
-        log.info({ jobId, targetType: target[0] || 'N/A', textLength: message.length }, '[DRY_RUN] 跳過 LINE push');
-      } else {
+      if (deliveredTargets.has(target)) continue;
+      if (!dryRun) {
         await pushMessage(target, message);
       }
       deliveredTargets.add(target);
       await upsertJobRun(jobId, {
-        status: 'running',
-        attempts,
-        startedAt,
-        targetMonthKey,
+        ...(await getJobRun(jobId)),
         deliveredTargets: [...deliveredTargets],
-        dryRun,
+        status: 'running',
       });
     }
 
+    await updateMonthState(targetMonthKey, (current) => ({
+      reportPublished: true,
+      reportPublishedAt: new Date().toISOString(),
+      publishedSnapshotTs: officialFinalSnapshotTs,
+      reportOutOfSync: false,
+      reportOutOfSyncSince: null,
+      reportOutOfSyncReason: null,
+    }));
+
     await upsertJobRun(jobId, {
+      ...(await getJobRun(jobId)),
       status: 'success',
-      attempts,
-      startedAt,
+      outcome: 'published',
       finishedAt: new Date().toISOString(),
-      targetMonthKey,
       deliveredTargets: [...deliveredTargets],
-      totalUsage,
+      totalUsage: snapshot.totalUsage,
       additionalCount,
       feeRounded,
       planFee,
       totalFeeRounded,
-      dryRun,
     });
 
-    log.info({ jobId, targetMonthKey, dryRun }, '每月回報執行完成');
+    return { status: 'success', outcome: 'published', targetMonthKey };
   } catch (err) {
-    const errMsg = err.message || String(err);
-    log.error({ jobId, error: errMsg, stack: err.stack }, '每月回報執行失敗');
-    await upsertJobRun(jobId, {
-      status: 'failed',
-      attempts,
-      startedAt,
-      finishedAt: new Date().toISOString(),
+    const latest = await getJobRun(jobId);
+    const outcome = latest?.dispatchStartedAt ? 'publish_unknown_delivery_state' : 'publish_failed';
+    await failPublish(jobId, {
+      ...(latest || {}),
       targetMonthKey,
-      deliveredTargets: [...deliveredTargets],
-      dryRun,
-      lastError: errMsg,
-    }).catch(() => {});
-    process.exit(1);
+      outcome,
+      lastError: err.message || String(err),
+    });
+    if (outcome === 'publish_unknown_delivery_state') {
+      return { status: 'failed', outcome, targetMonthKey };
+    }
+    throw err;
   }
 }
 
-/**
- * 組成符合規格的繁中推播訊息
- */
+export const runReport = runPublishReport;
+
 export function buildReportMessage({
   periodDisplay,
   monthLabel,
@@ -179,19 +329,17 @@ export function buildReportMessage({
   currencySymbol,
 }) {
   const fmt = (n) => n.toLocaleString('zh-TW');
-    const lines = [
-      '【LINE 訊息用量回報】',
-      `期間：${periodDisplay}（${monthLabel}）`,
-      `總用量：${fmt(totalUsage)} 則（historical backfill 月結）`,
-      `加購訊息量：${fmt(additionalCount)} 則`,
-      `加購費用：${currencySymbol} ${fmt(feeRounded)}（依設定估算）`,
-    ];
-
+  const lines = [
+    '【LINE 訊息用量回報】',
+    `期間：${periodDisplay}（${monthLabel}）`,
+    `總用量：${fmt(totalUsage)} 則（historical backfill 月結）`,
+    `加購訊息量：${fmt(additionalCount)} 則`,
+    `加購費用：${currencySymbol} ${fmt(feeRounded)}（依設定估算）`,
+  ];
   if (planFee > 0) {
     lines.push(`方案費：${currencySymbol} ${fmt(planFee)}`);
     lines.push(`費用合計：${currencySymbol} ${fmt(totalFeeRounded)}（含稅前，依設定估算）`);
   }
-
   lines.push('備註：月報依 LINE daily delivery historical backfill 計算；帳單仍以 OA Manager 後台為準。');
   return lines.join('\n');
 }

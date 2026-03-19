@@ -1,7 +1,7 @@
 import { runSnapshot } from './actions/snapshot.js';
-import { runReport } from './actions/report.js';
 import { runBackfill } from './actions/backfill.js';
 import { runMonthlyClose } from './actions/monthlyClose.js';
+import { runPublishReport } from './actions/report.js';
 import logger from './lib/logger.js';
 
 const [, , action, ...rest] = process.argv;
@@ -31,7 +31,7 @@ function parseArgs(args) {
 
 async function main() {
   if (!action) {
-    logger.error('用法: node src/index.js <snapshot|backfill|report|report-only> [--month=prev|YYYY-MM] [--rebuild=true]');
+    logger.error('用法: node src/index.js <snapshot|backfill|monthly-close-scheduled|monthly-close|publish-report> [--month=prev|YYYY-MM] [--rebuild=true]');
     process.exit(1);
   }
 
@@ -46,12 +46,28 @@ async function main() {
       dryRun,
       rebuild: args.rebuild === 'true',
     });
-  } else if (action === 'report') {
-    await runMonthlyClose({ month: args.month || 'prev', dryRun });
-  } else if (action === 'report-only') {
-    await runReport({ month: args.month || 'prev', dryRun });
+  } else if (action === 'monthly-close-scheduled') {
+    await runMonthlyClose({
+      mode: 'scheduled',
+      month: args.month || 'prev',
+      dryRun,
+    });
+  } else if (action === 'monthly-close') {
+    await runMonthlyClose({
+      mode: 'manual',
+      month: args.month,
+      confirmMonth: args['confirm-month'],
+      dryRun,
+    });
+  } else if (action === 'publish-report') {
+    await runPublishReport({
+      month: args.month || 'prev',
+      confirmMonth: args['confirm-month'],
+      dryRun,
+      republish: args.republish === 'true',
+    });
   } else {
-    logger.error({ action }, `未知的 action: ${action}，支援：snapshot, backfill, report, report-only；backfill 若要覆寫既有 official final 請加 --rebuild=true`);
+    logger.error({ action }, '未知的 action: snapshot, backfill, monthly-close-scheduled, monthly-close, publish-report；backfill 若要覆寫既有 official final 請加 --rebuild=true');
     process.exit(1);
   }
 }
