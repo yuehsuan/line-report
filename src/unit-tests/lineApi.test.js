@@ -16,7 +16,7 @@ before(() => {
   for (const k of envKeys) originalEnv[k] = process.env[k];
   process.env.LINE_CHANNEL_ACCESS_TOKEN = 'test-token';
   process.env.LINE_API_TIMEOUT_MS = '1234';
-  process.env.LINE_API_MAX_ATTEMPTS = '3';
+  process.env.LINE_API_MAX_ATTEMPTS = '5';
   process.env.LINE_API_RETRY_BASE_MS = '1';
   process.env.LINE_API_RETRY_JITTER_MS = '1';
   process.env.DRY_RUN = 'false';
@@ -140,7 +140,7 @@ describe('pushMessage', () => {
       () => pushMessage('U_test', 'hello'),
       /HTTP 503, requestId=req-503/,
     );
-    assert.equal(axiosPostCalls.length, 3);
+    assert.equal(axiosPostCalls.length, 5);
   });
 });
 

@@ -14,7 +14,7 @@ import {
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 const originalEnv = {};
-const envKeys = ['DRY_RUN', 'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'PATCH_A_CUTOVER_MONTH'];
+const envKeys = ['DRY_RUN', 'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'PATCH_A_CUTOVER_MONTH', 'BACKFILL_DAY_DELAY_MS'];
 
 before(() => {
   for (const k of envKeys) originalEnv[k] = process.env[k];
@@ -23,6 +23,7 @@ before(() => {
   process.env.DDB_TABLE_SNAPSHOTS = 'usage_snapshots';
   process.env.DDB_TABLE_RUNS = 'job_runs';
   process.env.PATCH_A_CUTOVER_MONTH = '2026-01';
+  process.env.BACKFILL_DAY_DELAY_MS = '0';
 });
 
 after(() => {
@@ -38,7 +39,7 @@ beforeEach(() => {
 
 let mockGetDailyDelivery = async () => ({ status: 'ready', totalUsage: 100, raw: {} });
 
-const { runBackfill, getMonthlyCloseWaitTimeoutMs, waitForOfficialFinal } = await esmock('../actions/backfill.js', {
+const { getBackfillDayDelayMs, runBackfill, getMonthlyCloseWaitTimeoutMs, waitForOfficialFinal } = await esmock('../actions/backfill.js', {
   '../lib/lineApi.js': {
     getDailyDelivery: async (...args) => mockGetDailyDelivery(...args),
   },
@@ -308,16 +309,17 @@ describe('runBackfill', () => {
 });
 
 describe('getMonthlyCloseWaitTimeoutMs', () => {
-  test('預設等待時間應大於固定 30 秒，足以覆蓋整月 backfill', () => {
+  test('預設等待時間應反映較長 retry/backoff 與 backfill 節流預算', () => {
     const timeoutMs = getMonthlyCloseWaitTimeoutMs('2026-03', {
       LINE_API_TIMEOUT_MS: '10000',
-      LINE_API_MAX_ATTEMPTS: '3',
-      LINE_API_RETRY_BASE_MS: '500',
+      LINE_API_MAX_ATTEMPTS: '5',
+      LINE_API_RETRY_BASE_MS: '2000',
       LINE_API_RETRY_JITTER_MS: '250',
+      BACKFILL_DAY_DELAY_MS: '2000',
     });
 
     assert.ok(timeoutMs > 30000);
-    assert.ok(timeoutMs >= 31 * 30000, '應至少大於 31 天 sequential API 的粗略預算');
+    assert.ok(timeoutMs >= 31 * 80250, '應至少覆蓋 31 天 sequential API + retry/backoff + 固定節流的預算');
   });
 
   test('若設定 MONTHLY_CLOSE_WAIT_MS，應優先使用顯式值', () => {
@@ -326,6 +328,16 @@ describe('getMonthlyCloseWaitTimeoutMs', () => {
     });
 
     assert.equal(timeoutMs, 45000);
+  });
+});
+
+describe('getBackfillDayDelayMs', () => {
+  test('預設應為 2000ms', () => {
+    assert.equal(getBackfillDayDelayMs({}), 2000);
+  });
+
+  test('允許顯式設為 0，供測試或緊急維運使用', () => {
+    assert.equal(getBackfillDayDelayMs({ BACKFILL_DAY_DELAY_MS: '0' }), 0);
   });
 });
 

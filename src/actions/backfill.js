@@ -24,6 +24,51 @@ import { createLogger } from '../lib/logger.js';
 
 const log = createLogger({ action: 'backfill' });
 const CUTOVER_ENV = 'PATCH_A_CUTOVER_MONTH';
+const DEFAULT_BACKFILL_DAY_DELAY_MS = 2000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function getBackfillDayDelayMs(env = process.env) {
+  const raw = env.BACKFILL_DAY_DELAY_MS;
+  if (raw === undefined) return DEFAULT_BACKFILL_DAY_DELAY_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_BACKFILL_DAY_DELAY_MS;
+}
+
+function getLineApiTimeoutMs(env = process.env) {
+  const parsed = Number.parseInt(env.LINE_API_TIMEOUT_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10000;
+}
+
+function getLineApiMaxAttempts(env = process.env) {
+  const parsed = Number.parseInt(env.LINE_API_MAX_ATTEMPTS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+}
+
+function getLineApiRetryBaseMs(env = process.env) {
+  const parsed = Number.parseInt(env.LINE_API_RETRY_BASE_MS || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 2000;
+}
+
+function getLineApiRetryJitterMs(env = process.env) {
+  const parsed = Number.parseInt(env.LINE_API_RETRY_JITTER_MS || '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 250;
+}
+
+function getRetryBudgetMs(env = process.env) {
+  const maxAttempts = getLineApiMaxAttempts(env);
+  const timeoutMs = getLineApiTimeoutMs(env);
+  const baseMs = getLineApiRetryBaseMs(env);
+  const jitterMs = getLineApiRetryJitterMs(env);
+  let total = maxAttempts * timeoutMs;
+  for (let attempt = 1; attempt < maxAttempts; attempt++) {
+    total += baseMs * (2 ** Math.max(0, attempt - 1));
+    total += jitterMs;
+  }
+  return total;
+}
 
 function getCutoverMonth() {
   const value = process.env[CUTOVER_ENV];
@@ -47,15 +92,24 @@ export function getBackfillJobId(targetMonthKey, dryRun) {
 export function getMonthlyCloseWaitTimeoutMs(targetMonthKey, env = process.env) {
   const explicit = Number.parseInt(env.MONTHLY_CLOSE_WAIT_MS || '', 10);
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
-  return Math.max(30000, getMonthDates(targetMonthKey).length * 30000);
+  const perDayBudgetMs = getRetryBudgetMs(env) + getBackfillDayDelayMs(env);
+  return Math.max(30000, getMonthDates(targetMonthKey).length * perDayBudgetMs);
 }
 
 export async function fetchMonthDailyUsage(targetMonthKey) {
   const dates = getMonthDates(targetMonthKey);
   const rows = [];
   let cumulativeTotal = 0;
+  const delayMs = getBackfillDayDelayMs();
 
-  for (const dateKey of dates) {
+  for (const [index, dateKey] of dates.entries()) {
+    log.info({
+      monthKey: targetMonthKey,
+      progress: `${index + 1}/${dates.length}`,
+      dateKey,
+      remainingDays: dates.length - index - 1,
+    }, '開始抓取 historical backfill 當日資料');
+
     const daily = await getDailyDelivery(toLineInsightDate(dateKey));
     if (daily.status !== 'ready') {
       throw new Error(`${targetMonthKey} 存在未就緒日資料：${dateKey} status=${daily.status}`);
@@ -69,6 +123,24 @@ export async function fetchMonthDailyUsage(targetMonthKey) {
       sourceDate: dateKey,
       source: 'historical_backfill',
     });
+
+    log.info({
+      monthKey: targetMonthKey,
+      progress: `${index + 1}/${dates.length}`,
+      dateKey,
+      dailyTotalUsage: daily.totalUsage,
+      cumulativeTotal,
+    }, 'historical backfill 當日資料抓取完成');
+
+    if (index < dates.length - 1 && delayMs > 0) {
+      log.info({
+        monthKey: targetMonthKey,
+        progress: `${index + 1}/${dates.length}`,
+        nextDateKey: dates[index + 1],
+        delayMs,
+      }, '等待 backfill 固定節流後再抓下一天');
+      await sleep(delayMs);
+    }
   }
 
   return rows;
