@@ -161,6 +161,7 @@ export async function runPublishReport({
     throw new Error(`${targetMonthKey} month-state 非法，publish-report 中止`);
   }
   if (state === 'already_converged' && !republish) {
+    log.info({ targetMonthKey, jobId: getJobId(targetMonthKey, dryRun) }, '每月回報已成功送出，略過（idempotent）');
     return { status: 'success', outcome: 'already_converged', targetMonthKey };
   }
   if (state === 'out_of_sync' && !republish) {
@@ -299,6 +300,14 @@ export async function runPublishReport({
       totalFeeRounded,
     });
 
+    log.info({
+      jobId,
+      targetMonthKey,
+      dryRun,
+      totalUsage: snapshot.totalUsage,
+      deliveredTargets: [...deliveredTargets],
+    }, '每月回報執行完成');
+
     return { status: 'success', outcome: 'published', targetMonthKey };
   } catch (err) {
     const latest = await getJobRun(jobId);
@@ -309,6 +318,13 @@ export async function runPublishReport({
       outcome,
       lastError: err.message || String(err),
     });
+    log.error({
+      jobId,
+      targetMonthKey,
+      dryRun,
+      outcome,
+      error: err.message || String(err),
+    }, '每月回報執行失敗');
     if (outcome === 'publish_unknown_delivery_state') {
       return { status: 'failed', outcome, targetMonthKey };
     }

@@ -1,6 +1,6 @@
 {
   "name": "line-report-iac",
-  "version": "2.7.1",
+  "version": "2.7.2",
   "description": "LINE 用量回報服務 AWS CDK IaC",
   "main": "bin/app.js",
   "scripts": {

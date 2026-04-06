@@ -9,6 +9,7 @@ import {
   GetCommand,
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { getNowTaipei, getPrevMonthKey } from '../lib/date.js';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
@@ -253,11 +254,13 @@ describe('runReport - 正常執行', () => {
 
     await runReport({ month: 'prev' });
 
+    const expectedPeriod = getPrevMonthKey(getNowTaipei()).replace('-', '/');
+
     assert.deepEqual(
       pushedMessages.map((item) => item.target),
       ['U_target_1', 'U_target_2'],
     );
-    assert.match(pushedMessages[0].message, /期間：2026\/02（前月）/);
+    assert.match(pushedMessages[0].message, new RegExp(`期間：${expectedPeriod}（前月）`));
 
     const successCall = ddbMock.commandCalls(PutCommand).find(
       (c) => c.args[0].input.Item?.status === 'success',

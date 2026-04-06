@@ -109,7 +109,7 @@ export async function runMonthlyClose({
     throw new Error(`${targetMonthKey} month-state 非法，monthly close 中止`);
   }
   if (state === 'already_converged') {
-    log.info({ targetMonthKey }, 'monthly close 命中 already_converged，strict no-op');
+    log.info({ targetMonthKey }, '每月回報已成功送出，略過（idempotent）');
     return { status: 'success', outcome: 'already_converged', targetMonthKey, snapshot };
   }
   if (state === 'out_of_sync') {
