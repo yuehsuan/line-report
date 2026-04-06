@@ -110,7 +110,7 @@ export class EcsStack extends cdk.Stack {
     const imageUri = `${ecrRepo.repositoryUri}:${imageTag}`;
 
     // ── 共用 SSM secrets 設定（兩個 task definition 共用）────────────
-    const ssmSecrets = {
+  const ssmSecrets = {
       LINE_CHANNEL_ACCESS_TOKEN: ecs.Secret.fromSsmParameter(
         ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmToken', {
           parameterName: '/line-report/LINE_CHANNEL_ACCESS_TOKEN',
@@ -142,9 +142,13 @@ export class EcsStack extends cdk.Stack {
       ),
       TIERS_JSON: ecs.Secret.fromSsmParameter(
         ssm.StringParameter.fromStringParameterName(this, 'SsmTiersJson',
-          '/line-report/TIERS_JSON')
-      ),
-    };
+      '/line-report/TIERS_JSON')
+    ),
+    PATCH_A_CUTOVER_MONTH: ecs.Secret.fromSsmParameter(
+      ssm.StringParameter.fromStringParameterName(this, 'SsmCutoverMonth',
+        '/line-report/PATCH_A_CUTOVER_MONTH')
+    ),
+  };
 
     const sharedEnv = {
       TZ: 'Asia/Taipei',

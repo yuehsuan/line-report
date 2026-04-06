@@ -82,6 +82,7 @@ if [[ "$FILTER" == "all" ]]; then
   put_ssm "PLAN_FEE"         "/line-report/PLAN_FEE"         "String" "$(env_val PLAN_FEE)"
   put_ssm "SINGLE_UNIT_PRICE" "/line-report/SINGLE_UNIT_PRICE" "String" "$(env_val SINGLE_UNIT_PRICE)"
   put_ssm "CURRENCY"         "/line-report/CURRENCY"         "String" "$(env_val CURRENCY)"
+  put_ssm "PATCH_A_CUTOVER_MONTH" "/line-report/PATCH_A_CUTOVER_MONTH" "String" "$(env_val PATCH_A_CUTOVER_MONTH)"
 
   TIERS=$(env_val TIERS_JSON)
   if [[ -n "$TIERS" ]]; then

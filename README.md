@@ -759,3 +759,7 @@ aws dynamodb get-item \
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
 - 正式環境若需重新部署，請至少確認 `.env` 內 `IMAGE_TAG` 已設定；若要收到通知，再補 `ALARM_EMAIL` / `DEBUG_EMAIL`
 - `scripts/sync-ssm.sh` 會沿用 `AWS_PROFILE`；若未設定，則使用 AWS CLI 預設 credentials chain
+
+### Patch A Rollout Ops Checklist
+
+完整的 rollout 檢查清單與 runbook/SOP 已放在 `doc/plan/2026-04-06_ops_patchA_rollout.md`，on-call / 維運若需要進行 cutover 或處理 unknown delivery state，請直接參考該文件。
