@@ -442,7 +442,7 @@ aws ecs run-task \
 # 手動執行回報
 aws ecs run-task \
   --cluster line-report \
-  --task-definition line-report-report \
+  --task-definition line-report-monthly-close \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}"
 ```
@@ -538,7 +538,7 @@ ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
 aws ecs describe-task-definition --task-definition line-report-snapshot \
   --query 'taskDefinition.containerDefinitions[0].image' --output text
 
-aws ecs describe-task-definition --task-definition line-report-report \
+aws ecs describe-task-definition --task-definition line-report-monthly-close \
   --query 'taskDefinition.containerDefinitions[0].image' --output text
 ```
 
@@ -550,7 +550,7 @@ aws ecs describe-task-definition --task-definition line-report-report \
 aws ecs describe-task-definition --task-definition line-report-snapshot \
   --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
 
-aws ecs describe-task-definition --task-definition line-report-report \
+aws ecs describe-task-definition --task-definition line-report-monthly-close \
   --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
 ```
 

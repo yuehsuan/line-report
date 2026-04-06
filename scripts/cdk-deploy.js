@@ -218,12 +218,12 @@ const expectedImage = `${identity.Account}.dkr.ecr.${process.env.AWS_REGION || '
 
 if (shouldVerifyStack('LineReportEcsStack')) {
   verifyTaskDefinitionImage('line-report-snapshot', expectedImage, cpuArchitecture);
-  verifyTaskDefinitionImage('line-report-report', expectedImage, cpuArchitecture);
+  verifyTaskDefinitionImage('line-report-monthly-close', expectedImage, cpuArchitecture);
 }
 
 if (shouldVerifyStack('LineReportSchedulerStack') || shouldVerifyStack('LineReportEcsStack')) {
   verifyScheduleState('line-report-daily-snapshot', 'line-report-snapshot');
-  verifyScheduleState('line-report-monthly-report', 'line-report-report');
+  verifyScheduleState('line-report-monthly-report', 'line-report-monthly-close');
 }
 
 console.log('[cdk-deploy] 部署後驗證全部通過');
