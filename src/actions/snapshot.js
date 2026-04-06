@@ -152,6 +152,7 @@ export async function runSnapshot() {
       startedAt: existingRun?.startedAt || ts,
       finishedAt: new Date().toISOString(),
     });
+    log.info({ jobId, monthKey, dateKey, ts }, '今日快照已成功完成，略過（idempotent）');
     return;
   }
 
@@ -189,6 +190,7 @@ export async function runSnapshot() {
     });
 
     await evaluateSecondary({ monthKey, dateKey, totalUsage, ts, jobId, attempts });
+    log.info({ jobId, monthKey, dateKey, ts, totalUsage }, '快照執行完成');
   } catch (err) {
     await upsertJobRun(jobId, {
       status: 'failed',
@@ -200,6 +202,13 @@ export async function runSnapshot() {
       lastError: err.message || String(err),
       outcome: 'snapshot_secondary_failed',
     });
+    log.error({
+      jobId,
+      monthKey,
+      dateKey,
+      ts,
+      error: err.message || String(err),
+    }, '快照執行失敗');
     process.exit(1);
   }
 }
