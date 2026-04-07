@@ -1,0 +1,3 @@
+[submodule "doc/plan"]
+	path = doc/plan
+	url = git@github.com:yuehsuan/line-report-doc.git

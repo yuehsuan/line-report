@@ -43,7 +43,7 @@ function isRetryableError(err) {
 }
 
 function getRetryDelayMs(attempt) {
-  const baseDelayMs = getPositiveIntEnv('LINE_API_RETRY_BASE_MS', 500);
+  const baseDelayMs = getPositiveIntEnv('LINE_API_RETRY_BASE_MS', 2000);
   const jitterCapMs = getPositiveIntEnv('LINE_API_RETRY_JITTER_MS', 250);
   const exponentialDelay = baseDelayMs * (2 ** Math.max(0, attempt - 1));
   const jitter = jitterCapMs > 0 ? Math.floor(Math.random() * jitterCapMs) : 0;
@@ -70,7 +70,7 @@ function buildLineApiError(err, context) {
 }
 
 async function requestWithRetry(context, requestFn) {
-  const maxAttempts = getPositiveIntEnv('LINE_API_MAX_ATTEMPTS', 3);
+  const maxAttempts = getPositiveIntEnv('LINE_API_MAX_ATTEMPTS', 5);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {

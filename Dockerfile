@@ -2,8 +2,8 @@
 # node:22-alpine 含較新 OpenSSL 3.5.x，減少 ECR Inspector 掃出的 Node 內建 OpenSSL CVE
 FROM node:22-alpine AS deps
 WORKDIR /app
-# 升級 OS openssl 並更新 npm bundled 套件（修復 CVE 群組 A/B）
-RUN apk upgrade --no-cache openssl && npm install -g npm@latest
+# 升級 OS openssl；避免在 base image 內自升 npm，該流程目前會不穩定且不影響 runtime image
+RUN apk upgrade --no-cache openssl
 COPY package*.json ./
 RUN npm ci --omit=dev
 

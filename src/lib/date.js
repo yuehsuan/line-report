@@ -121,3 +121,22 @@ export function getLiveSnapshotTs(dt) {
     : adjusted;
   return toUtcIso(safeDt);
 }
+
+/**
+ * 取得每日 live snapshot 的 deterministic slot ts。
+ * 同一個 dateKey 的所有 rerun 都必須對應同一筆 row。
+ * @param {string} dateKey
+ * @returns {string}
+ */
+export function getDailyLiveSnapshotTs(dateKey) {
+  const dt = DateTime.fromFormat(dateKey, 'yyyy-MM-dd', { zone: TAIPEI_TZ })
+    .set({ hour: 23, minute: 59, second: 0, millisecond: 0 });
+  if (!dt.isValid) {
+    throw new Error(`無效的 dateKey: ${dateKey}`);
+  }
+  return dt.toUTC().toISO();
+}
+
+export function compareMonthKey(a, b) {
+  return a.localeCompare(b);
+}

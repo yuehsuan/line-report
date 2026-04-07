@@ -17,7 +17,7 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 const originalEnv = {};
 const envKeys = [
   'DRY_RUN', 'LINE_CHANNEL_ACCESS_TOKEN',
-  'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS',
+  'AWS_ENDPOINT_URL', 'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD',
 ];
 
 before(() => {
@@ -27,6 +27,7 @@ before(() => {
   process.env.AWS_ENDPOINT_URL           = 'http://localhost:8000';
   process.env.DDB_TABLE_SNAPSHOTS        = 'usage_snapshots';
   process.env.DDB_TABLE_RUNS             = 'job_runs';
+  process.env.SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD = '10000';
 });
 
 after(() => {
@@ -71,10 +72,10 @@ function withMockedExit(fn) {
 // 幂等略過：今日已成功執行則略過
 // ─────────────────────────────────────────────
 describe('runSnapshot - 幂等略過', () => {
-  test('getJobRun 回傳 status=success → 直接 return，不呼叫 LINE API', async () => {
-    ddbMock.on(GetCommand).resolves({
-      Item: { jobId: 'snapshot#today', status: 'success' },
-    });
+  test('deterministic snapshot row 已存在時應直接 no-op，不呼叫 LINE API', async () => {
+    ddbMock.on(GetCommand)
+      .resolvesOnce({ Item: { monthKey: '2026-03', ts: '2026-03-19T15:59:00.000Z', totalUsage: 5000 } })
+      .resolves({ Item: { jobId: 'snapshot#today', status: 'success' } });
     ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     let getConsumptionCalled = false;
@@ -86,7 +87,8 @@ describe('runSnapshot - 幂等略過', () => {
     await runSnapshot();
 
     assert.equal(getConsumptionCalled, false, 'getConsumption 不應被呼叫');
-    assert.equal(ddbMock.commandCalls(PutCommand).length, 0, 'PutCommand 不應被呼叫');
+    const jobRunPuts = ddbMock.commandCalls(PutCommand);
+    assert.equal(jobRunPuts.length, 1, '應只補寫 job_run no-op 狀態');
   });
 });
 

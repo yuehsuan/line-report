@@ -1,0 +1,50 @@
+model = "gpt-5-codex"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+[agents]
+max_threads = 6
+
+[agents.spec]
+description = "Product spec agent for clarifying requirements, MVP scope, user stories, acceptance criteria, and out-of-scope."
+config_file = ".codex/roles/spec.md"
+
+[agents.ux]
+description = "UX and product flow agent for user flows, interaction paths, and edge UX cases."
+config_file = ".codex/roles/ux.md"
+
+[agents.design]
+description = "System design agent for architecture, module boundaries, APIs, data models, and technical trade-offs."
+config_file = ".codex/roles/design.md"
+
+[agents.build]
+description = "Build agent for implementing features, wiring code, and producing the working solution."
+config_file = ".codex/roles/build.md"
+
+[agents.qa]
+description = "QA and acceptance agent for checking acceptance criteria, test scenarios, regression risks, and edge cases."
+config_file = ".codex/roles/qa.md"
+
+[agents.integrity]
+description = "Data integrity and workflow agent for state transitions, idempotency, async workflows, and cross-step consistency."
+config_file = ".codex/roles/integrity.md"
+
+[agents.security]
+description = "Security agent for auth, validation, secret handling, file/path safety, and abuse-path review."
+config_file = ".codex/roles/security.md"
+
+[agents.maintain]
+description = "Maintainability and refactor agent for coupling, duplication, extensibility, and testability review."
+config_file = ".codex/roles/maintain.md"
+
+[agents.perf]
+description = "Performance and scalability agent for latency, query patterns, cache strategy, and scaling risks."
+config_file = ".codex/roles/perf.md"
+
+[agents.ops]
+description = "Observability and operations agent for logging, metrics, alerts, runbooks, deployment readiness, and operational blind spots."
+config_file = ".codex/roles/ops.md"
+
+[agents.Constraint]
+description = "Constraint and scope guard agent for scope boundaries, non-goals, acceptance criteria, trade-offs, and design gating."
+config_file = ".codex/roles/Constraint.md"

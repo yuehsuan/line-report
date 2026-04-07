@@ -42,7 +42,7 @@ export class SchedulerStack extends cdk.Stack {
     // 即使透過 addPropertyOverride() 注入，也會被 CloudFormation schema 驗證擋住。
     // 改以兩個 task definition 各自 bake in 指令，架構更清晰且無 type hack。
     const snapshotTaskDefArn = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-snapshot`;
-    const reportTaskDefArn   = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-report`;
+    const reportTaskDefArn   = `arn:aws:ecs:${this.region}:${this.account}:task-definition/line-report-monthly-close`;
 
     // Role ARN 用固定名稱建構
     const executionRoleArn = `arn:aws:iam::${this.account}:role/line-report-task-execution-role`;

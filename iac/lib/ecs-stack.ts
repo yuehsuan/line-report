@@ -20,7 +20,7 @@ export interface EcsStackProps extends cdk.StackProps {
 export class EcsStack extends cdk.Stack {
   public readonly cluster: ecs.Cluster;
   public readonly snapshotTaskDefinition: ecs.FargateTaskDefinition;
-  public readonly reportTaskDefinition: ecs.FargateTaskDefinition;
+  public readonly monthlyCloseTaskDefinition: ecs.FargateTaskDefinition;
   public readonly taskSecurityGroup: ec2.SecurityGroup;
   public readonly taskSubnets: ec2.SubnetSelection;
 
@@ -110,7 +110,7 @@ export class EcsStack extends cdk.Stack {
     const imageUri = `${ecrRepo.repositoryUri}:${imageTag}`;
 
     // ── 共用 SSM secrets 設定（兩個 task definition 共用）────────────
-    const ssmSecrets = {
+  const ssmSecrets = {
       LINE_CHANNEL_ACCESS_TOKEN: ecs.Secret.fromSsmParameter(
         ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmToken', {
           parameterName: '/line-report/LINE_CHANNEL_ACCESS_TOKEN',
@@ -142,9 +142,13 @@ export class EcsStack extends cdk.Stack {
       ),
       TIERS_JSON: ecs.Secret.fromSsmParameter(
         ssm.StringParameter.fromStringParameterName(this, 'SsmTiersJson',
-          '/line-report/TIERS_JSON')
-      ),
-    };
+      '/line-report/TIERS_JSON')
+    ),
+    PATCH_A_CUTOVER_MONTH: ecs.Secret.fromSsmParameter(
+      ssm.StringParameter.fromStringParameterName(this, 'SsmCutoverMonth',
+        '/line-report/PATCH_A_CUTOVER_MONTH')
+    ),
+  };
 
     const sharedEnv = {
       TZ: 'Asia/Taipei',
@@ -180,9 +184,9 @@ export class EcsStack extends cdk.Stack {
       }),
     });
 
-    // ── Task Definition B：每月回報（command bake in，Scheduler 無需 override）
-    this.reportTaskDefinition = new ecs.FargateTaskDefinition(this, 'ReportTaskDefinition', {
-      family: 'line-report-report',
+    // ── Task Definition B：每月月結（command bake in，Scheduler 無需 override）
+    this.monthlyCloseTaskDefinition = new ecs.FargateTaskDefinition(this, 'MonthlyCloseTaskDefinition', {
+      family: 'line-report-monthly-close',
       cpu: 256,
       memoryLimitMiB: 512,
       executionRole,
@@ -193,12 +197,15 @@ export class EcsStack extends cdk.Stack {
       },
     });
 
-    this.reportTaskDefinition.addContainer('app', {
+    this.monthlyCloseTaskDefinition.addContainer('app', {
       containerName: 'app',
       image: ecs.ContainerImage.fromRegistry(imageUri),
       essential: true,
-      command: ['node', 'src/index.js', 'report', '--month=prev'],
-      environment: sharedEnv,
+      command: ['node', 'src/index.js', 'monthly-close-scheduled', '--month=prev'],
+      environment: {
+        ...sharedEnv,
+        MONTHLY_CLOSE_SCHEDULED: 'true',
+      },
       secrets: ssmSecrets,
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'line-report',
@@ -217,7 +224,7 @@ export class EcsStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'ReportTaskDefinitionArn', {
-      value: this.reportTaskDefinition.taskDefinitionArn,
+      value: this.monthlyCloseTaskDefinition.taskDefinitionArn,
       exportName: 'LineReportReportTaskDefinitionArn',
     });
 

@@ -139,9 +139,21 @@ line-report/
 ├── .github/workflows/
 │   └── deploy.yml            # GitHub Actions CI/CD
 ├── doc/                      # 需求規劃、架構圖、ADR、Runbook
+│   └── plan/                 # private Git submodule：design / review / decision docs
 ├── Dockerfile
 └── .env.example
 ```
+
+---
+
+## 文件子模組說明
+
+- `doc/plan/` 是 private Git submodule
+- 用來放 design / review / decision docs
+- 不屬於 runtime dependency，不影響應用程式執行或部署時的必要依賴
+- 若要更新 `doc/plan/`：
+  - 先進入 submodule 完成 commit / push
+  - 再回主 repo 更新 submodule pointer
 
 ---
 
@@ -430,7 +442,7 @@ aws ecs run-task \
 # 手動執行回報
 aws ecs run-task \
   --cluster line-report \
-  --task-definition line-report-report \
+  --task-definition line-report-monthly-close \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[subnet-xxxx],securityGroups=[sg-xxxx],assignPublicIp=ENABLED}"
 ```
@@ -526,7 +538,7 @@ ECR_URI="<帳號>.dkr.ecr.<區域>.amazonaws.com/line-report"
 aws ecs describe-task-definition --task-definition line-report-snapshot \
   --query 'taskDefinition.containerDefinitions[0].image' --output text
 
-aws ecs describe-task-definition --task-definition line-report-report \
+aws ecs describe-task-definition --task-definition line-report-monthly-close \
   --query 'taskDefinition.containerDefinitions[0].image' --output text
 ```
 
@@ -538,7 +550,7 @@ aws ecs describe-task-definition --task-definition line-report-report \
 aws ecs describe-task-definition --task-definition line-report-snapshot \
   --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
 
-aws ecs describe-task-definition --task-definition line-report-report \
+aws ecs describe-task-definition --task-definition line-report-monthly-close \
   --query 'taskDefinition.runtimePlatform.cpuArchitecture' --output text
 ```
 
@@ -747,3 +759,7 @@ aws dynamodb get-item \
 - image tag 禁止使用 `latest`，任何 CI/CD 與 CDK 部署均強制使用明確版本 tag
 - 正式環境若需重新部署，請至少確認 `.env` 內 `IMAGE_TAG` 已設定；若要收到通知，再補 `ALARM_EMAIL` / `DEBUG_EMAIL`
 - `scripts/sync-ssm.sh` 會沿用 `AWS_PROFILE`；若未設定，則使用 AWS CLI 預設 credentials chain
+
+### Patch A Rollout Ops Checklist
+
+完整的 rollout 檢查清單與 runbook/SOP 已放在 `doc/plan/2026-04-06_ops_patchA_rollout.md`，on-call / 維運若需要進行 cutover 或處理 unknown delivery state，請直接參考該文件。

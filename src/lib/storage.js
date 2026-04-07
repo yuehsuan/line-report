@@ -43,6 +43,10 @@ export async function writeSnapshot({ monthKey, ts, totalUsage, rawJson }) {
   }
 }
 
+export async function getSnapshot(monthKey, ts) {
+  return dbGet(TABLE_SNAPSHOTS(), { monthKey, ts });
+}
+
 /**
  * 查詢指定月份的所有快照，依 ts 排序
  * @param {string} monthKey
@@ -147,6 +151,21 @@ export async function getOfficialFinalSnapshots(monthKey) {
       ':t': true,
     },
   });
+}
+
+export async function getLatestLiveSnapshot(monthKey) {
+  const items = await dbQuery(TABLE_SNAPSHOTS(), {
+    KeyConditionExpression: 'monthKey = :mk',
+    FilterExpression: '#source = :source',
+    ExpressionAttributeNames: { '#source': 'source' },
+    ExpressionAttributeValues: {
+      ':mk': monthKey,
+      ':source': 'live_snapshot',
+    },
+    ScanIndexForward: false,
+    Limit: 1,
+  });
+  return items[0] || null;
 }
 
 /**
@@ -272,6 +291,112 @@ export async function promoteBackfillBuild(monthKey, backfillBuildId) {
   await dbTransactWrite(transactItems);
   log.info({ monthKey, backfillBuildId, promotedTs: newFinal.ts }, '已切換 official final');
   return { ...newFinal, isOfficialFinal: true };
+}
+
+export function getMonthStateJobId(monthKey) {
+  return `month-state#${monthKey}`;
+}
+
+export async function getMonthState(monthKey) {
+  return getJobRun(getMonthStateJobId(monthKey));
+}
+
+export async function putMonthState(monthKey, fields) {
+  return upsertJobRun(getMonthStateJobId(monthKey), fields);
+}
+
+export async function createMonthStateIfAbsent(monthKey, {
+  officialFinalSnapshotTs,
+} = {}) {
+  const ttl = Math.floor(Date.now() / 1000) + JOB_RUN_TTL_SECONDS;
+  const item = {
+    jobId: getMonthStateJobId(monthKey),
+    stateVersion: 1,
+    officialFinalSnapshotTs,
+    reportPublished: false,
+    reportPublishedAt: null,
+    publishedSnapshotTs: null,
+    reportOutOfSync: false,
+    reportOutOfSyncSince: null,
+    reportOutOfSyncReason: null,
+    updatedAt: new Date().toISOString(),
+    ttl,
+  };
+  try {
+    await dbPut(TABLE_RUNS(), item, {
+      ConditionExpression: 'attribute_not_exists(jobId)',
+    });
+    return item;
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException || err.name === 'ConditionalCheckFailedException') {
+      return getMonthState(monthKey);
+    }
+    throw err;
+  }
+}
+
+export function classifyMonthState(item) {
+  if (!item?.officialFinalSnapshotTs) return 'invalid_month_state';
+  if (
+    item.reportPublished === false
+    && item.publishedSnapshotTs == null
+    && item.reportOutOfSync === false
+  ) {
+    return 'unpublished_ready';
+  }
+  if (
+    item.reportPublished === true
+    && item.publishedSnapshotTs
+    && item.reportOutOfSync === false
+    && item.officialFinalSnapshotTs === item.publishedSnapshotTs
+  ) {
+    return 'already_converged';
+  }
+  if (
+    item.reportPublished === true
+    && item.publishedSnapshotTs
+    && item.reportOutOfSync === true
+    && item.officialFinalSnapshotTs !== item.publishedSnapshotTs
+  ) {
+    return 'out_of_sync';
+  }
+  return 'invalid_month_state';
+}
+
+export async function updateMonthState(monthKey, updater) {
+  const current = await getMonthState(monthKey);
+  if (!current) {
+    throw new Error(`${monthKey} 找不到 month-state`);
+  }
+  const nextFields = updater(current);
+  const next = {
+    ...current,
+    ...nextFields,
+    stateVersion: (current.stateVersion || 0) + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  await dbPut(TABLE_RUNS(), next, {
+    ConditionExpression: 'attribute_exists(jobId) AND stateVersion = :version',
+    ExpressionAttributeValues: {
+      ':version': current.stateVersion,
+    },
+  });
+  return next;
+}
+
+export function officialFinalComparableRows(rows = []) {
+  return rows.map((row) => ({
+    monthKey: row.monthKey,
+    source: row.source,
+    sourceDate: row.sourceDate,
+    effectiveTs: row.effectiveTs,
+    totalUsage: row.totalUsage,
+  }));
+}
+
+export function isSameOfficialFinalRows(currentRows = [], candidateRows = []) {
+  return JSON.stringify(officialFinalComparableRows(currentRows))
+    === JSON.stringify(officialFinalComparableRows(candidateRows));
 }
 
 /**
