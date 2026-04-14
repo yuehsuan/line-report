@@ -140,6 +140,10 @@ export class EcsStack extends cdk.Stack {
         ssm.StringParameter.fromStringParameterName(this, 'SsmCurrency',
           '/line-report/CURRENCY')
       ),
+      SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD: ecs.Secret.fromSsmParameter(
+        ssm.StringParameter.fromStringParameterName(this, 'SsmSnapshotAlertDailyDeltaThreshold',
+          '/line-report/SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD')
+      ),
       TIERS_JSON: ecs.Secret.fromSsmParameter(
         ssm.StringParameter.fromStringParameterName(this, 'SsmTiersJson',
       '/line-report/TIERS_JSON')

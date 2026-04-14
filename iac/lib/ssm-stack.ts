@@ -88,6 +88,14 @@ export class SsmStack extends cdk.Stack {
       tier: ssm.ParameterTier.STANDARD,
     });
 
+    // 每日 snapshot 與前一天比較的異常增量告警門檻
+    new ssm.StringParameter(this, 'SnapshotAlertDailyDeltaThreshold', {
+      parameterName: '/line-report/SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD',
+      stringValue: '2000',
+      description: '每日 snapshot 與前一天比較的異常增量告警門檻',
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
     new cdk.CfnOutput(this, 'SsmBasePath', {
       value: '/line-report/',
       description: 'SSM Parameter Store 基礎路徑',

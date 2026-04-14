@@ -178,6 +178,7 @@ cp .env.example .env
 | `DDB_TABLE_SNAPSHOTS` | DynamoDB 快照表名 | `usage_snapshots` | |
 | `DDB_TABLE_RUNS` | DynamoDB 執行紀錄表名 | `job_runs` | |
 | `CURRENCY` | 貨幣符號 | `TWD` | |
+| `SNAPSHOT_ALERT_DAILY_DELTA_THRESHOLD` | 每日 snapshot 較前一日增量的異常告警門檻 | `2000` | |
 | `LOG_LEVEL` | pino log level | `info` | |
 | `TZ` | 容器時區（影響系統預設時區） | `Asia/Taipei` | |
 | `DRY_RUN` | `true` 時跳過 LINE 實際推播 | — | |
