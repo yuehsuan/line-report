@@ -160,6 +160,7 @@ export class EcsStack extends cdk.Stack {
       DDB_TABLE_SNAPSHOTS: snapshotsTable.tableName,
       DDB_TABLE_RUNS: runsTable.tableName,
       LOG_LEVEL: 'info',
+      TAX_RATE: process.env.TAX_RATE || '0.05',
     };
 
     // ── Task Definition A：每日快照（command bake in，Scheduler 無需 override）

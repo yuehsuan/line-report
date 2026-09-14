@@ -173,6 +173,7 @@ cp .env.example .env
 | `PRICING_MODEL` | 計費模式：`single` 或 `tiers` | `single` | |
 | `PLAN_FEE` | 方案月費（固定月租，0 表示不計入） | `0` | |
 | `SINGLE_UNIT_PRICE` | single 模式：每則單價（TWD） | `0.2` | |
+| `TAX_RATE` | 營業稅率（`0.05` 代表 5%） | `0.05` | |
 | `TIERS_JSON` | tiers 模式：級距 JSON（見下方說明） | — | tiers 時必填 |
 | `AWS_REGION` | AWS 區域 | `ap-northeast-1` | |
 | `DDB_TABLE_SNAPSHOTS` | DynamoDB 快照表名 | `usage_snapshots` | |
@@ -199,6 +200,22 @@ cp .env.example .env
 ```
 
 `upTo: null` 表示無上限最後一級，費用依級距累進計算。
+
+### 帳務金額計算
+
+月報依 LINE OA 的付款紀錄規則估算金額：先捨去未稅加購費的元以下金額，再計算並四捨五入稅額。方案費與加購訊息費分開計稅，對應 OA 分開扣款的兩筆付款項目。
+
+```text
+未稅加購費 = floor(加購訊息量 × 適用單價)
+加購費稅額 = round(未稅加購費 × TAX_RATE)
+加購費含稅 = 未稅加購費 + 加購費稅額
+
+方案費稅額 = round(PLAN_FEE × TAX_RATE)
+方案費含稅 = PLAN_FEE + 方案費稅額
+當月費用合計 = 加購費含稅 + 方案費含稅
+```
+
+方案費通常於當月月初收取；加購訊息費通常於次月 10 日前後收取。最終金額仍以 LINE OA Manager 帳單為準。
 
 ---
 

@@ -15,7 +15,7 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 
 const originalEnv = {};
 const envKeys = ['DRY_RUN', 'LINE_TARGETS', 'FREE_QUOTA', 'PRICING_MODEL',
-  'SINGLE_UNIT_PRICE', 'PLAN_FEE', 'CURRENCY', 'AWS_ENDPOINT_URL',
+  'SINGLE_UNIT_PRICE', 'PLAN_FEE', 'TAX_RATE', 'CURRENCY', 'AWS_ENDPOINT_URL',
   'DDB_TABLE_SNAPSHOTS', 'DDB_TABLE_RUNS', 'PATCH_A_CUTOVER_MONTH'];
 
 before(() => {
@@ -26,6 +26,7 @@ before(() => {
   process.env.PRICING_MODEL = 'single';
   process.env.SINGLE_UNIT_PRICE = '0.2';
   process.env.PLAN_FEE = '1200';
+  process.env.TAX_RATE = '0.05';
   process.env.CURRENCY = 'TWD';
   process.env.AWS_ENDPOINT_URL = 'http://localhost:8000';
   process.env.DDB_TABLE_SNAPSHOTS = 'usage_snapshots';
@@ -112,15 +113,23 @@ describe('buildReportMessage', () => {
       monthLabel: '指定月份',
       totalUsage: 8000,
       additionalCount: 2000,
-      feeRounded: 400,
+      additionalFeeBeforeTax: 400,
+      additionalTax: 20,
+      additionalFeeTaxIncluded: 420,
       planFee: 1200,
-      totalFeeRounded: 1600,
+      planFeeTaxIncluded: 1260,
+      totalFeeTaxIncluded: 1680,
       currencySymbol: 'NT$',
     });
 
     assert.match(message, /期間：2026\/01（指定月份）/);
     assert.doesNotMatch(message, /前月/);
     assert.match(message, /historical backfill 月結/);
+    assert.match(message, /加購費用：NT\$ 400（未稅）/);
+    assert.match(message, /加購費稅額：NT\$ 20/);
+    assert.match(message, /加購費扣款預估：NT\$ 420（含稅，次月約 10 日收取）/);
+    assert.match(message, /方案費：NT\$ 1,260（含稅，當月月初另行收取）/);
+    assert.match(message, /當月費用合計：NT\$ 1,680（含稅）/);
   });
 });
 
@@ -269,8 +278,15 @@ describe('runReport - 正常執行', () => {
     assert.equal(successCall.args[0].input.Item.totalUsage, 8000);
     assert.equal(successCall.args[0].input.Item.additionalCount, 2000);
     assert.equal(successCall.args[0].input.Item.feeRounded, 400);
+    assert.equal(successCall.args[0].input.Item.additionalFeeBeforeTax, 400);
+    assert.equal(successCall.args[0].input.Item.additionalTax, 20);
+    assert.equal(successCall.args[0].input.Item.additionalFeeTaxIncluded, 420);
     assert.equal(successCall.args[0].input.Item.planFee, 1200);
+    assert.equal(successCall.args[0].input.Item.planTax, 60);
+    assert.equal(successCall.args[0].input.Item.planFeeTaxIncluded, 1260);
     assert.equal(successCall.args[0].input.Item.totalFeeRounded, 1600);
+    assert.equal(successCall.args[0].input.Item.totalTax, 80);
+    assert.equal(successCall.args[0].input.Item.totalFeeTaxIncluded, 1680);
   });
 });
 

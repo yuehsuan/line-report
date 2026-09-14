@@ -4,7 +4,14 @@ import { calculateFee, calcTiersFee } from '../lib/pricing.js';
 
 // 測試前備份並設定環境變數，測試後還原
 const originalEnv = {};
-const envKeys = ['FREE_QUOTA', 'PRICING_MODEL', 'SINGLE_UNIT_PRICE', 'TIERS_JSON', 'PLAN_FEE'];
+const envKeys = [
+  'FREE_QUOTA',
+  'PRICING_MODEL',
+  'SINGLE_UNIT_PRICE',
+  'TIERS_JSON',
+  'PLAN_FEE',
+  'TAX_RATE',
+];
 
 function setEnv(vars) {
   for (const [k, v] of Object.entries(vars)) {
@@ -71,7 +78,12 @@ describe('calcTiersFee', () => {
 // ─────────────────────────────────────────────
 describe('calculateFee - single 模式', () => {
   before(() => {
-    setEnv({ PRICING_MODEL: 'single', SINGLE_UNIT_PRICE: '0.2', FREE_QUOTA: '1000' });
+    setEnv({
+      PRICING_MODEL: 'single',
+      SINGLE_UNIT_PRICE: '0.2',
+      FREE_QUOTA: '1000',
+      TAX_RATE: '0.05',
+    });
   });
   after(resetEnv);
 
@@ -95,12 +107,47 @@ describe('calculateFee - single 模式', () => {
     assert.equal(result.feeRounded, 100);
   });
 
-  test('feeRounded 四捨五入：1501 則，fee=0.2, rounded=0', () => {
+  test('未稅加購費的元以下金額無條件捨去', () => {
     setEnv({ FREE_QUOTA: '1500', SINGLE_UNIT_PRICE: '0.2' });
-    const result = calculateFee(1501);
-    assert.equal(result.additionalCount, 1);
+    const result = calculateFee(1504);
+    assert.equal(result.additionalCount, 4);
+    assert.equal(result.fee, 0.8);
     assert.equal(result.feeRounded, 0);
+    assert.equal(result.additionalFeeBeforeTax, 0);
   });
+});
+
+describe('calculateFee - OA 正式付款紀錄', () => {
+  before(() => {
+    setEnv({
+      PRICING_MODEL: 'single',
+      SINGLE_UNIT_PRICE: '0.2',
+      FREE_QUOTA: '6000',
+      PLAN_FEE: '1200',
+      TAX_RATE: '0.05',
+    });
+  });
+  after(resetEnv);
+
+  const cases = [
+    { totalUsage: 17677, beforeTax: 2335, tax: 117, taxIncluded: 2452 },
+    { totalUsage: 14052, beforeTax: 1610, tax: 81, taxIncluded: 1691 },
+    { totalUsage: 15441, beforeTax: 1888, tax: 94, taxIncluded: 1982 },
+    { totalUsage: 15032, beforeTax: 1806, tax: 90, taxIncluded: 1896 },
+    { totalUsage: 14188, beforeTax: 1637, tax: 82, taxIncluded: 1719 },
+  ];
+
+  for (const item of cases) {
+    test(`${item.totalUsage} 則應對上 OA 加購扣款 ${item.taxIncluded} 元`, () => {
+      const result = calculateFee(item.totalUsage);
+      assert.equal(result.additionalFeeBeforeTax, item.beforeTax);
+      assert.equal(result.additionalTax, item.tax);
+      assert.equal(result.additionalFeeTaxIncluded, item.taxIncluded);
+      assert.equal(result.planTax, 60);
+      assert.equal(result.planFeeTaxIncluded, 1260);
+      assert.equal(result.totalFeeTaxIncluded, item.taxIncluded + 1260);
+    });
+  }
 });
 
 // ─────────────────────────────────────────────
@@ -141,7 +188,12 @@ describe('calculateFee - tiers 模式', () => {
 // ─────────────────────────────────────────────
 describe('calculateFee - PLAN_FEE 方案月費', () => {
   before(() => {
-    setEnv({ PRICING_MODEL: 'single', SINGLE_UNIT_PRICE: '0.2', FREE_QUOTA: '1000' });
+    setEnv({
+      PRICING_MODEL: 'single',
+      SINGLE_UNIT_PRICE: '0.2',
+      FREE_QUOTA: '1000',
+      TAX_RATE: '0.05',
+    });
   });
   after(resetEnv);
 
@@ -158,7 +210,11 @@ describe('calculateFee - PLAN_FEE 方案月費', () => {
     const result = calculateFee(1500); // additionalCount=500, fee=100
     assert.equal(result.planFee, 1200);
     assert.equal(result.feeRounded, 100);
+    assert.equal(result.planTax, 60);
+    assert.equal(result.planFeeTaxIncluded, 1260);
     assert.equal(result.totalFeeRounded, 1300);
+    assert.equal(result.totalTax, 65);
+    assert.equal(result.totalFeeTaxIncluded, 1365);
   });
 
   test('用量低於 free quota 但有 PLAN_FEE：totalFeeRounded 只含方案費', () => {
@@ -167,7 +223,9 @@ describe('calculateFee - PLAN_FEE 方案月費', () => {
     assert.equal(result.additionalCount, 0);
     assert.equal(result.feeRounded, 0);
     assert.equal(result.planFee, 1200);
+    assert.equal(result.planFeeTaxIncluded, 1260);
     assert.equal(result.totalFeeRounded, 1200);
+    assert.equal(result.totalFeeTaxIncluded, 1260);
   });
 });
 
@@ -178,6 +236,12 @@ describe('calculateFee - 錯誤處理', () => {
   test('不支援的 PRICING_MODEL 拋出錯誤', () => {
     setEnv({ PRICING_MODEL: 'unknown', FREE_QUOTA: '0' });
     assert.throws(() => calculateFee(100), /不支援的 PRICING_MODEL/);
+    resetEnv();
+  });
+
+  test('TAX_RATE 非數字時拋出錯誤', () => {
+    setEnv({ PRICING_MODEL: 'single', FREE_QUOTA: '0', TAX_RATE: 'invalid' });
+    assert.throws(() => calculateFee(100), /TAX_RATE/);
     resetEnv();
   });
 });

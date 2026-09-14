@@ -5,19 +5,30 @@ const log = createLogger({ module: 'pricing' });
 /**
  * 依環境變數計算加購費用與總費用
  *
- * @param {number} totalUsage  當月總用量（來自 LINE consumption API，為近似值）
+ * @param {number} totalUsage  當月計費訊息總用量
  * @returns {{
  *   additionalCount: number,
  *   fee: number,
  *   feeRounded: number,
+ *   additionalFeeBeforeTax: number,
+ *   additionalTax: number,
+ *   additionalFeeTaxIncluded: number,
  *   planFee: number,
- *   totalFeeRounded: number
+ *   planTax: number,
+ *   planFeeTaxIncluded: number,
+ *   totalFeeRounded: number,
+ *   totalTax: number,
+ *   totalFeeTaxIncluded: number
  * }}
  */
 export function calculateFee(totalUsage) {
   const freeQuota = parseInt(process.env.FREE_QUOTA || '0', 10);
   const model = process.env.PRICING_MODEL || 'single';
   const planFee = parseInt(process.env.PLAN_FEE || '0', 10);
+  const taxRate = parseFloat(process.env.TAX_RATE || '0.05');
+  if (!Number.isFinite(taxRate) || taxRate < 0) {
+    throw new Error('TAX_RATE 必須是大於或等於 0 的數字');
+  }
   const additionalCount = Math.max(0, totalUsage - freeQuota);
 
   let fee = 0;
@@ -38,9 +49,33 @@ export function calculateFee(totalUsage) {
     throw new Error(`不支援的 PRICING_MODEL: ${model}`);
   }
 
-  const feeRounded = Math.round(fee);
-  const totalFeeRounded = feeRounded + planFee;
-  return { additionalCount, fee, feeRounded, planFee, totalFeeRounded };
+  // LINE OA 先將未稅加購費的元以下金額捨去，再對整數未稅金額計算稅額。
+  const additionalFeeBeforeTax = Math.floor(fee);
+  const additionalTax = Math.round(additionalFeeBeforeTax * taxRate);
+  const additionalFeeTaxIncluded = additionalFeeBeforeTax + additionalTax;
+  const planTax = Math.round(planFee * taxRate);
+  const planFeeTaxIncluded = planFee + planTax;
+  const totalFeeBeforeTax = additionalFeeBeforeTax + planFee;
+  const totalTax = additionalTax + planTax;
+  const totalFeeTaxIncluded = additionalFeeTaxIncluded + planFeeTaxIncluded;
+
+  // 保留既有欄位名稱，避免舊的 job_runs 查詢失效；兩者皆代表未稅整數金額。
+  const feeRounded = additionalFeeBeforeTax;
+  const totalFeeRounded = totalFeeBeforeTax;
+  return {
+    additionalCount,
+    fee,
+    feeRounded,
+    additionalFeeBeforeTax,
+    additionalTax,
+    additionalFeeTaxIncluded,
+    planFee,
+    planTax,
+    planFeeTaxIncluded,
+    totalFeeRounded,
+    totalTax,
+    totalFeeTaxIncluded,
+  };
 }
 
 /**

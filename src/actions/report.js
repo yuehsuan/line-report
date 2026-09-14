@@ -246,15 +246,31 @@ export async function runPublishReport({
   const periodDisplay = `${year}/${mm}`;
   const currency = process.env.CURRENCY || 'TWD';
   const currencySymbol = currency === 'TWD' ? 'NT$' : currency;
-  const { additionalCount, feeRounded, planFee, totalFeeRounded } = calculateFee(snapshot.totalUsage);
+  const feeDetails = calculateFee(snapshot.totalUsage);
+  const {
+    additionalCount,
+    feeRounded,
+    additionalFeeBeforeTax,
+    additionalTax,
+    additionalFeeTaxIncluded,
+    planFee,
+    planTax,
+    planFeeTaxIncluded,
+    totalFeeRounded,
+    totalTax,
+    totalFeeTaxIncluded,
+  } = feeDetails;
   const message = buildReportMessage({
     periodDisplay,
     monthLabel: month === 'prev' ? '前月' : '指定月份',
     totalUsage: snapshot.totalUsage,
     additionalCount,
-    feeRounded,
+    additionalFeeBeforeTax,
+    additionalTax,
+    additionalFeeTaxIncluded,
     planFee,
-    totalFeeRounded,
+    planFeeTaxIncluded,
+    totalFeeTaxIncluded,
     currencySymbol,
   });
 
@@ -296,8 +312,15 @@ export async function runPublishReport({
       totalUsage: snapshot.totalUsage,
       additionalCount,
       feeRounded,
+      additionalFeeBeforeTax,
+      additionalTax,
+      additionalFeeTaxIncluded,
       planFee,
+      planTax,
+      planFeeTaxIncluded,
       totalFeeRounded,
+      totalTax,
+      totalFeeTaxIncluded,
     });
 
     log.info({
@@ -339,9 +362,12 @@ export function buildReportMessage({
   monthLabel,
   totalUsage,
   additionalCount,
-  feeRounded,
+  additionalFeeBeforeTax,
+  additionalTax,
+  additionalFeeTaxIncluded,
   planFee,
-  totalFeeRounded,
+  planFeeTaxIncluded,
+  totalFeeTaxIncluded,
   currencySymbol,
 }) {
   const fmt = (n) => n.toLocaleString('zh-TW');
@@ -350,12 +376,14 @@ export function buildReportMessage({
     `期間：${periodDisplay}（${monthLabel}）`,
     `總用量：${fmt(totalUsage)} 則（historical backfill 月結）`,
     `加購訊息量：${fmt(additionalCount)} 則`,
-    `加購費用：${currencySymbol} ${fmt(feeRounded)}（依設定估算）`,
+    `加購費用：${currencySymbol} ${fmt(additionalFeeBeforeTax)}（未稅）`,
+    `加購費稅額：${currencySymbol} ${fmt(additionalTax)}`,
+    `加購費扣款預估：${currencySymbol} ${fmt(additionalFeeTaxIncluded)}（含稅，次月約 10 日收取）`,
   ];
   if (planFee > 0) {
-    lines.push(`方案費：${currencySymbol} ${fmt(planFee)}`);
-    lines.push(`費用合計：${currencySymbol} ${fmt(totalFeeRounded)}（含稅前，依設定估算）`);
+    lines.push(`方案費：${currencySymbol} ${fmt(planFeeTaxIncluded)}（含稅，當月月初另行收取）`);
+    lines.push(`當月費用合計：${currencySymbol} ${fmt(totalFeeTaxIncluded)}（含稅）`);
   }
-  lines.push('備註：月報依 LINE daily delivery historical backfill 計算；帳單仍以 OA Manager 後台為準。');
+  lines.push('備註：月報依 LINE daily delivery historical backfill 與設定稅率估算；實際帳單仍以 OA Manager 後台為準。');
   return lines.join('\n');
 }
