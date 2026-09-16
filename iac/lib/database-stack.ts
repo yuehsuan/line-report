@@ -23,7 +23,7 @@ export class DatabaseStack extends cdk.Stack {
     });
 
     // ── job_runs ──────────────────────────────────────────────────
-    // PK: jobId (S)  e.g. "snapshot#2026-02-25" / "report#2026-01"
+    // PK: jobId (S)  e.g. "snapshot#2026-02-25" / "publish-report#2026-01"
     this.runsTable = new dynamodb.Table(this, 'JobRunsTable', {
       tableName: 'job_runs',
       partitionKey: { name: 'jobId', type: dynamodb.AttributeType.STRING },

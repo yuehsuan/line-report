@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -104,7 +106,7 @@ def most_recent_report_target_month(now_taipei: datetime) -> str:
 
 def report_healthy(now_taipei: datetime) -> float:
     target_month_key = most_recent_report_target_month(now_taipei)
-    item = get_job_run(f"report#{target_month_key}")
+    item = get_job_run(f"publish-report#{target_month_key}")
     return 1.0 if is_successful(item) else 0.0
 
 
